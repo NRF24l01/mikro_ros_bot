@@ -1,13 +1,15 @@
 /****************************************************************
  * PWM + Wi-Fi + AsyncWebServer + PCNT-энкодеры + ОДОМЕТРИЯ + PID-регулятор
  * Управление и мониторинг по Wi-Fi (JSON API)
- * Добавлена обратная одометрия: управление и телеметрия по V (мм/с) и W (рад/с)
+ * PID коэффициенты сохраняются в SPIFFS и загружаются при старте.
  ****************************************************************/
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include "driver/pcnt.h"
 #include <math.h>
+#include <FS.h>
+#include <SPIFFS.h>
 
 /* ── Аппаратные параметры ─────────────────────────────*/
 #define L_A 32
@@ -56,6 +58,40 @@ struct PID {
   float outL = 0, outR = 0;
   float targetL = 0, targetR = 0; // мм/с
 } pid;
+
+// PID config file path in SPIFFS
+const char* PID_CONFIG_FILE = "/pid.json";
+
+/* ── Сохранение/загрузка PID коэффициентов ───────────*/
+#include <ArduinoJson.h>
+
+void savePIDToSPIFFS() {
+  DynamicJsonDocument doc(256);
+  doc["kp"] = pid.kp;
+  doc["ki"] = pid.ki;
+  doc["kd"] = pid.kd;
+  doc["kff"] = pid.kff;
+  File file = SPIFFS.open(PID_CONFIG_FILE, FILE_WRITE);
+  if (file) {
+    serializeJson(doc, file);
+    file.close();
+  }
+}
+
+void loadPIDFromSPIFFS() {
+  if (!SPIFFS.exists(PID_CONFIG_FILE)) return;
+  File file = SPIFFS.open(PID_CONFIG_FILE, FILE_READ);
+  if (file) {
+    DynamicJsonDocument doc(256);
+    if (deserializeJson(doc, file) == DeserializationError::Ok) {
+      if (doc.containsKey("kp")) pid.kp = doc["kp"];
+      if (doc.containsKey("ki")) pid.ki = doc["ki"];
+      if (doc.containsKey("kd")) pid.kd = doc["kd"];
+      if (doc.containsKey("kff")) pid.kff = doc["kff"];
+    }
+    file.close();
+  }
+}
 
 /* ── PWM ─────────────────────────────────────────────*/
 void analogWriteTrack(uint8_t pin, uint8_t duty) {
@@ -164,7 +200,7 @@ void setupWiFiAndRoutes() {
   server.on("/state",HTTP_GET,[](AsyncWebServerRequest *req){
     // обновить vwTarget по targetL/targetR (на случай, если они были заданы напрямую)
     update_vw_from_targets();
-    char js[640];
+    char js[700];
     snprintf(js,sizeof(js),
       "{\"duty\":{\"L_A\":%u,\"L_B\":%u,\"R_A\":%u,\"R_B\":%u},"
       "\"enc\":{\"left\":%ld,\"right\":%ld},"
@@ -184,12 +220,24 @@ void setupWiFiAndRoutes() {
     req->send(200,"application/json",js);
   });
 
+  // Получить только PID коэффициенты (для быстрой инициализации GUI)
+  server.on("/pid", HTTP_GET, [](AsyncWebServerRequest *req){
+    char js[128];
+    snprintf(js, sizeof(js),
+      "{\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f,\"kff\":%.3f}",
+      pid.kp, pid.ki, pid.kd, pid.kff
+    );
+    req->send(200, "application/json", js);
+  });
+
   // Установка коэффициентов PID
   server.on("/setPID", HTTP_GET, [](AsyncWebServerRequest *req){
-    if(req->hasParam("kp")) pid.kp = req->getParam("kp")->value().toFloat();
-    if(req->hasParam("ki")) pid.ki = req->getParam("ki")->value().toFloat();
-    if(req->hasParam("kd")) pid.kd = req->getParam("kd")->value().toFloat();
-    if(req->hasParam("kff")) pid.kff = req->getParam("kff")->value().toFloat();
+    bool changed = false;
+    if(req->hasParam("kp")) { pid.kp = req->getParam("kp")->value().toFloat(); changed = true; }
+    if(req->hasParam("ki")) { pid.ki = req->getParam("ki")->value().toFloat(); changed = true; }
+    if(req->hasParam("kd")) { pid.kd = req->getParam("kd")->value().toFloat(); changed = true; }
+    if(req->hasParam("kff")) { pid.kff = req->getParam("kff")->value().toFloat(); changed = true; }
+    if (changed) savePIDToSPIFFS();
     req->send(200,"text/plain","PID updated");
   });
 
@@ -223,7 +271,7 @@ void setupWiFiAndRoutes() {
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/plain",
-        "OK. Use /state, /setPID, /setWheelsSpeed, /setVW, /resetAll");
+        "OK. Use /state, /pid, /setPID, /setWheelsSpeed, /setVW, /resetAll");
   });
   server.begin();
 }
@@ -231,6 +279,14 @@ void setupWiFiAndRoutes() {
 /* ── SETUP ───────────────────────────────────────────*/
 void setup() {
   Serial.begin(115200);
+
+  // SPIFFS init
+  if (!SPIFFS.begin(true)) {
+    Serial.println("SPIFFS mount failed!");
+  } else {
+    loadPIDFromSPIFFS();
+  }
+
   pinMode(L_A,OUTPUT); pinMode(L_B,OUTPUT);
   pinMode(R_A,OUTPUT); pinMode(R_B,OUTPUT); stopMotors();
 
