@@ -1,14 +1,15 @@
 /****************************************************************
- *  PWM + Wi-Fi + AsyncWebServer + PCNT-энкодеры  v2
+ *  PWM + Wi-Fi + AsyncWebServer + PCNT-энкодеры  v2 + ОДОМЕТРИЯ
  *  ────────────────────────────────────────────────────────────
- *  /state       → JSON со скважностями и счётчиками (32-бит)
+ *  /state       → JSON со скважностями, счётчиками, одометрией
  *  /setPWM      ?la=..&lb=..&ra=..&rb=..   (0-255)  — задаёт ШИМ
- *  /resetEnc    → обнуляет оба счётчика
+ *  /resetEnc    → обнуляет оба счётчика и одометрию
  ****************************************************************/
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 #include "driver/pcnt.h"
+#include <math.h>
 
 /* ── пины моторов ───────────────────────────────────────────*/
 #define L_A 32
@@ -21,6 +22,11 @@
 #define ENC_R_B 36
 #define ENC_L_A 35
 #define ENC_L_B 34
+
+/* ── ПАРАМЕТРЫ РОБОТА ──────────────────────────────────────*/
+constexpr float WHEEL_RADIUS = 0.0446f;  // Радиус колеса, метры (например, 32 мм)
+constexpr float BASE        = 0.0956f;    // База робота (расстояние между колёсами), метры
+constexpr int   TICKS_PER_TURN = 2936;   // Импульсов энкодера на оборот колеса
 
 /* ── Wi-Fi ────────────────────────────────────────────*/
 constexpr char SSID[] = "robotx";
@@ -35,6 +41,15 @@ volatile int32_t encTotalR = 0;
 
 /* ── AsyncWebServer ──────────────────────────────────*/
 AsyncWebServer server(80);
+
+/* ── ОДОМЕТРИЯ ───────────────────────────────────────*/
+struct Odom {
+  float x = 0;    // [м]
+  float y = 0;    // [м]
+  float theta = 0;// [рад]
+  float v = 0;    // [м/с]
+  float w = 0;    // [рад/с]
+} odom;
 
 /*──────────────── PWM-утилиты ─────────────────────────*/
 void analogWriteTrack(uint8_t pin, uint8_t duty)
@@ -66,6 +81,27 @@ inline int16_t snapPCNT(pcnt_unit_t u){
   int16_t v; pcnt_get_counter_value(u,&v); pcnt_counter_clear(u); return v;
 }
 
+/*─── ОДОМЕТРИЯ: вычисление ───────────────────────────*/
+void updateOdometry(int32_t dTicksL, int32_t dTicksR, float dt)
+{
+  // 1. Переводим ticks -> метры (s = 2*PI*R*N / TICKS_PER_TURN)
+  float dL = (float)dTicksL * 2.0f * M_PI * WHEEL_RADIUS / TICKS_PER_TURN;
+  float dR = (float)dTicksR * 2.0f * M_PI * WHEEL_RADIUS / TICKS_PER_TURN;
+
+  // 2. Приращения
+  float dCenter = (dL + dR) * 0.5f;
+  float dTheta = (dR - dL) / BASE;
+
+  // 3. Обновление положения
+  odom.x += dCenter * cosf(odom.theta + dTheta/2.0f);
+  odom.y += dCenter * sinf(odom.theta + dTheta/2.0f);
+  odom.theta += dTheta;
+
+  // 4. Скорости (линейная и угловая)
+  odom.v = dCenter / dt;
+  odom.w = dTheta / dt;
+}
+
 /*─── Wi-Fi + Web ─────────────────────────────────────*/
 void setupWiFiAndRoutes()
 {
@@ -76,11 +112,13 @@ void setupWiFiAndRoutes()
 
   /* /state — текущие данные */
   server.on("/state",HTTP_GET,[](AsyncWebServerRequest *req){
-    char js[192];
+    char js[320];
     snprintf(js,sizeof(js),
       "{\"duty\":{\"L_A\":%u,\"L_B\":%u,\"R_A\":%u,\"R_B\":%u},"
-      "\"enc\":{\"left\":%ld,\"right\":%ld}}",
-      dutyLA,dutyLB,dutyRA,dutyRB, encTotalL,encTotalR);
+      "\"enc\":{\"left\":%ld,\"right\":%ld},"
+      "\"odom\":{\"x\":%.4f,\"y\":%.4f,\"theta\":%.4f,\"v\":%.4f,\"w\":%.4f}}",
+      dutyLA,dutyLB,dutyRA,dutyRB, encTotalL,encTotalR,
+      odom.x, odom.y, odom.theta, odom.v, odom.w);
     req->send(200,"application/json",js);
   });
 
@@ -93,14 +131,15 @@ void setupWiFiAndRoutes()
     req->send(200,"text/plain","PWM updated");
   });
 
-  /* /resetEnc — обнуление счётчиков */
+  /* /resetEnc — обнуление счётчиков и одометрии */
   server.on("/resetEnc",HTTP_GET,[](AsyncWebServerRequest *req){
     encTotalL=encTotalR=0;
+    odom = Odom(); // Сбросить структуру одометрии
     pcnt_counter_clear(PCNT_UNIT_0); pcnt_counter_clear(PCNT_UNIT_1);
-    req->send(200,"text/plain","Encoders reset");
+    req->send(200,"text/plain","Encoders and odometry reset");
   });
 
-server.on("/", HTTP_GET,
+  server.on("/", HTTP_GET,
           [](AsyncWebServerRequest *request) {
               request->send(200, "text/plain",
                              "OK. Use /state, /setPWM, /resetEnc");
@@ -126,18 +165,29 @@ void setup()
 /*──────────────────────── LOOP ──────────────────────*/
 void loop()
 {
-  /* ➊ каждые ~10 мс снимаем приращения и расширяем до int32 */
+  /* ➊ каждые ~10 мс снимаем приращения, расширяем до int32 и обновляем одометрию */
   static uint32_t tEnc=0;
-  if(millis()-tEnc>=10){
-    tEnc=millis();
-    encTotalR+=snapPCNT(PCNT_UNIT_0);
-    encTotalL+=snapPCNT(PCNT_UNIT_1);
+  static int32_t prevL=0, prevR=0;
+  static uint32_t lastUpdate = 0;
+  uint32_t now = millis();
+  if(now-tEnc>=10){
+    tEnc=now;
+    int16_t dR = snapPCNT(PCNT_UNIT_0);
+    int16_t dL = snapPCNT(PCNT_UNIT_1);
+    encTotalR += dR;
+    encTotalL += dL;
+    float dt = (now-lastUpdate)/1000.0f;
+    if(dt > 0.0001f) { // защита от деления на ноль
+      updateOdometry(dL, dR, dt);
+      lastUpdate = now;
+    }
   }
 
   /* ➋ раз в 500 мс выводим в Serial */
   static uint32_t tLog=0;
-  if(millis()-tLog>=500){
-    tLog=millis();
+  if(now-tLog>=500){
+    tLog=now;
     Serial.printf("Enc L: %ld\tEnc R: %ld\n",encTotalL,encTotalR);
+    Serial.printf("Odom: x=%.3f y=%.3f th=%.3f v=%.3f w=%.3f\n", odom.x, odom.y, odom.theta, odom.v, odom.w);
   }
 }
