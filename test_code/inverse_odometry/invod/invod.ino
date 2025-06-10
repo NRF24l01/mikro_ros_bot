@@ -17,8 +17,8 @@
 #define L_B 33
 #define R_A 26
 #define R_B 25
-#define ENC_R_A 39
-#define ENC_R_B 36
+#define ENC_R_A 18
+#define ENC_R_B 19
 #define ENC_L_A 35
 #define ENC_L_B 34
 
