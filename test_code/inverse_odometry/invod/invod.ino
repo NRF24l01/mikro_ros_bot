@@ -10,6 +10,7 @@
 #include <math.h>
 #include <FS.h>
 #include <SPIFFS.h>
+#include <ArduinoJson.h>
 
 /* ── Аппаратные параметры ─────────────────────────────*/
 #define L_A 32
@@ -61,9 +62,6 @@ struct PID {
 
 // PID config file path in SPIFFS
 const char* PID_CONFIG_FILE = "/pid.json";
-
-/* ── Сохранение/загрузка PID коэффициентов ───────────*/
-#include <ArduinoJson.h>
 
 void savePIDToSPIFFS() {
   DynamicJsonDocument doc(256);
