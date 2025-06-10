@@ -15,7 +15,7 @@ setup(
         (os.path.join('share', package_name, 'launch'),
          glob(os.path.join('launch', '*launch.[pxy][yma]*')))
     ],
-    install_requires=['setuptools', 'requests'],
+    install_requires=['setuptools', 'requests', 'websockets'],
     zip_safe=True,
     maintainer='technik12345',
     maintainer_email='s.nevrovsky@ya.ru',
