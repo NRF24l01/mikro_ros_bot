@@ -69,6 +69,12 @@ struct PID {
 
 const char* PID_CONFIG_FILE = "/pid.json";
 
+/* ── ADDED FOR STRAIGHT DRIVING ──────────────────────*/
+/* Логика компенсации при прямолинейном движении */
+bool straightMode = false;       // Флаг: робот движется по прямой
+int32_t leftBase = 0, rightBase = 0; // Запоминание начальных значений энкодеров
+float KencStraight = 3.0f;       // Коэффициент пропорциональности
+
 float readBatteryVoltage() {
   int adc_raw = adc1_get_raw(ADC1_CHANNEL_3);
   float v_adc_pin = adc_raw * (3.3f / 4095.0f);
@@ -162,6 +168,19 @@ void pidUpdate(float dt, float vL, float vR) {
   pid.outL = constrainf(pid.outL, -255, 255);
   pid.outR = constrainf(pid.outR, -255, 255);
 
+  /* ── ADDED FOR STRAIGHT DRIVING ──────────────────────────────*/
+  /* Если мы в режиме прямолинейного движения, корректируем выходы */
+  if (straightMode) {
+    long diff = (encTotalL - leftBase) - (encTotalR - rightBase);
+    float corr = KencStraight * (float)diff;
+    pid.outL -= corr * 0.5f;
+    pid.outR += corr * 0.5f;
+    // Повторно ограничиваем диапазон
+    pid.outL = constrainf(pid.outL, -255, 255);
+    pid.outR = constrainf(pid.outR, -255, 255);
+  }
+  /* ── END STRAIGHT DRIVING ADDITION ───────────────────────────*/
+
   if (pid.outL > 0) { analogWriteTrack(L_A, (uint8_t)pid.outL); analogWriteTrack(L_B, 0); }
   else { analogWriteTrack(L_A, 0); analogWriteTrack(L_B, (uint8_t)(-pid.outL)); }
   if (pid.outR > 0) { analogWriteTrack(R_A, (uint8_t)pid.outR); analogWriteTrack(R_B, 0); }
@@ -177,8 +196,8 @@ void updateOdometryAndSpeed(int32_t dTicksL, int32_t dTicksR, float dt) {
 
   float dCenter = (dL + dR) * 0.5f;
   float dTheta = (dR - dL) / BASE;
-  odom.x += dCenter * cosf(odom.theta + dTheta*0.5f); // Corrected: dTheta/2.0f
-  odom.y += dCenter * sinf(odom.theta + dTheta*0.5f); // Corrected: dTheta/2.0f
+  odom.x += dCenter * cosf(odom.theta + dTheta*0.5f);
+  odom.y += dCenter * sinf(odom.theta + dTheta*0.5f);
   odom.theta += dTheta;
   if (dt > 0.0001f) {
     odom.v = dCenter / dt;
@@ -193,7 +212,21 @@ void set_targets_from_vw(float v_mm_s, float w_rad_s) {
   pid.targetR = v_mm_s + (BASE * 500.0f) * w_rad_s;
   vwTarget.v = v_mm_s;
   vwTarget.w = w_rad_s;
+
+  /* ── ADDED FOR STRAIGHT DRIVING ──────────────────────────────*/
+  // Если задано практически прямолинейное движение (w ~ 0), фиксируем энкодеры
+  if (fabs(w_rad_s) < 0.0001f && fabs(v_mm_s) > 0.0001f) {
+    if (!straightMode) {
+      straightMode = true;
+      leftBase = encTotalL;
+      rightBase = encTotalR;
+    }
+  } else {
+    straightMode = false;
+  }
+  /* ── END STRAIGHT DRIVING ADDITION ───────────────────────────*/
 }
+
 void update_vw_from_targets() {
   vwTarget.v = (pid.targetL + pid.targetR) * 0.5f;
   vwTarget.w = (pid.targetR - pid.targetL) / (BASE * 1000.0f);
@@ -203,10 +236,7 @@ void sendStateOverWebSocket() {
   update_vw_from_targets(); // Ensure vwTarget is up-to-date
   currentBatteryVoltage = readBatteryVoltage();
 
-  // Increased buffer size for safety, consider using ArduinoJson for construction
-  // if the string becomes much larger or more complex.
   char js_buffer[800]; 
-  
   snprintf(js_buffer, sizeof(js_buffer),
     "{\"type\":\"state\","
     "\"duty\":{\"L_A\":%u,\"L_B\":%u,\"R_A\":%u,\"R_B\":%u},"
@@ -214,14 +244,14 @@ void sendStateOverWebSocket() {
     "\"odom\":{\"x\":%.4f,\"y\":%.4f,\"theta\":%.4f,\"v\":%.4f,\"w\":%.4f},"
     "\"speed\":{\"left\":%.1f,\"right\":%.1f},"
     "\"pid_coeffs\":{\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f,\"kff\":%.3f},"
-    "\"vw_target\":{\"v\":%.1f,\"w\":%.3f}," // Renamed "vw" to "vw_target" for clarity
-    "\"pwm_out\":{\"L\":%.1f,\"R\":%.1f},"  // Renamed "pwm" to "pwm_out"
+    "\"vw_target\":{\"v\":%.1f,\"w\":%.3f},"
+    "\"pwm_out\":{\"L\":%.1f,\"R\":%.1f},"
     "\"battery_v\":%.2f}",
     dutyLA, dutyLB, dutyRA, dutyRB, encTotalL, encTotalR,
     odom.x, odom.y, odom.theta, odom.v, odom.w,
     wheelSpeed.left, wheelSpeed.right,
     pid.kp, pid.ki, pid.kd, pid.kff, 
-    vwTarget.v, vwTarget.w, // Use updated vwTarget
+    vwTarget.v, vwTarget.w,
     pid.outL, pid.outR,
     currentBatteryVoltage
   );
@@ -235,27 +265,21 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
     char* msg_payload = (char*)data;
     Serial.printf("WS Rcv: %s\n", msg_payload);
 
-    DynamicJsonDocument doc(512); // Adjust size as needed for commands
+    DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, msg_payload);
 
     if (error) {
       Serial.print(F("deserializeJson() failed: "));
       Serial.println(error.f_str());
-      // Optionally send an error back to the client
-      // client->text("{\"type\":\"error\", \"message\":\"Invalid JSON\"}");
       return;
     }
 
     const char* action = doc["action"];
     if (!action) {
-        // client->text("{\"type\":\"error\", \"message\":\"Action missing\"}");
         return;
     }
     
-    AsyncWebSocketClient *client = (AsyncWebSocketClient*)arg; // This might not be correct, need the client who sent it.
-                                                               // The onEvent handler provides the client.
-                                                               // For now, we'll assume this function is called from a context where client is available
-                                                               // or we send generic status. Best to handle response in onEvent.
+    AsyncWebSocketClient *client = (AsyncWebSocketClient*)arg; // This might not be correct context for each library version
 
     if (strcmp(action, "setVW") == 0) {
       float v = doc["v"] | 0.0f;
@@ -267,7 +291,6 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
           pid.sumL = 0; pid.sumR = 0;
           pid.outL = 0; pid.outR = 0;
       }
-      // client->text("{\"type\":\"status\", \"action_acked\":\"setVW\", \"message\":\"VW targets updated\"}");
       Serial.println("WS: setVW processed");
     } else if (strcmp(action, "setPID") == 0) {
       bool changed = false;
@@ -276,14 +299,12 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
       if (doc.containsKey("kd")) { pid.kd = doc["kd"]; changed = true; }
       if (doc.containsKey("kff")) { pid.kff = doc["kff"]; changed = true; }
       if (changed) savePIDToSPIFFS();
-      // client->text("{\"type\":\"status\", \"action_acked\":\"setPID\", \"message\":\"PID updated\"}");
       Serial.println("WS: setPID processed");
     } else if (strcmp(action, "setWheelsSpeed") == 0) {
       if (doc.containsKey("left"))  pid.targetL = doc["left"];
       if (doc.containsKey("right")) pid.targetR = doc["right"];
       update_vw_from_targets();
-      // client->text("{\"type\":\"status\", \"action_acked\":\"setWheelsSpeed\", \"message\":\"Wheel speed targets updated\"}");
-       Serial.println("WS: setWheelsSpeed processed");
+      Serial.println("WS: setWheelsSpeed processed");
     } else if (strcmp(action, "resetAll") == 0) {
       encTotalL=encTotalR=0;
       odom = Odom(); wheelSpeed = WheelSpeed();
@@ -293,21 +314,17 @@ void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
       vwTarget.v = 0; vwTarget.w = 0;
       stopMotors();
       pcnt_counter_clear(PCNT_UNIT_0); pcnt_counter_clear(PCNT_UNIT_1);
-      // client->text("{\"type\":\"status\", \"action_acked\":\"resetAll\", \"message\":\"All reset\"}");
       Serial.println("WS: resetAll processed");
     } else if (strcmp(action, "getPID") == 0) {
         char js[128];
         snprintf(js, sizeof(js), "{\"type\":\"pid_coeffs\",\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f,\"kff\":%.3f}", pid.kp, pid.ki, pid.kd, pid.kff);
-        // client->text(js); // This needs the specific client who requested
         Serial.println("WS: getPID processed, response needs client context");
     } else if (strcmp(action, "getBattery") == 0) {
         currentBatteryVoltage = readBatteryVoltage();
         char js[64];
         snprintf(js, sizeof(js), "{\"type\":\"battery\",\"voltage\":%.2f}", currentBatteryVoltage);
-        // client->text(js); // This needs the specific client who requested
         Serial.println("WS: getBattery processed, response needs client context");
     } else {
-        // client->text("{\"type\":\"error\", \"message\":\"Unknown action\"}");
         Serial.printf("WS: Unknown action: %s\n", action);
     }
   }
@@ -317,15 +334,11 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
   switch (type) {
     case WS_EVT_CONNECT:
       Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
-      // Optionally send initial state or welcome message
-      // client->text("{\"type\":\"welcome\", \"message\":\"Connected to ESP32 Robot\"}");
-      // sendStateOverWebSocket(); // Send current state to newly connected client (or rely on periodic broadcast)
       break;
     case WS_EVT_DISCONNECT:
       Serial.printf("WebSocket client #%u disconnected\n", client->id());
       break;
     case WS_EVT_DATA:
-      // Pass to the handler function. The 'client' object is available here.
       {
         AwsFrameInfo *info = (AwsFrameInfo*)arg;
         if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
@@ -346,7 +359,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                 return;
             }
 
-            // Handle actions and send response to this specific client
             if (strcmp(action, "setVW") == 0) {
                 float v = doc["v"] | 0.0f;
                 float w = doc["w"] | 0.0f;
@@ -380,7 +392,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                 snprintf(js, sizeof(js), "{\"type\":\"pid_coeffs\",\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f,\"kff\":%.3f}", pid.kp, pid.ki, pid.kd, pid.kff);
                 client->text(js);
             } else if (strcmp(action, "getBattery") == 0) {
-                currentBatteryVoltage = readBatteryVoltage(); // Ensure it's fresh
+                currentBatteryVoltage = readBatteryVoltage();
                 char js[64];
                 snprintf(js, sizeof(js), "{\"type\":\"battery\",\"voltage\":%.2f}", currentBatteryVoltage);
                 client->text(js);
@@ -407,7 +419,7 @@ void setupWiFiAndServer() {
   ws.onEvent(onWsEvent); // Attach WebSocket event handler
   server.addHandler(&ws); // Add WebSocket handler to the server
 
-  // Basic HTTP endpoint for root, just to confirm server is up
+  // Basic HTTP endpoint for root
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "ESP32 Robot WebSocket Server is running. Connect to /ws");
   });
@@ -450,31 +462,28 @@ void loop() {
   if(now_ms - tEnc >= 10){ // Encoder, Odometry, and PID update loop (100Hz)
     tEnc = now_ms;
     int16_t dR = snapPCNT(PCNT_UNIT_0);
-    int16_t dL = snapPCNT(PCNT_UNIT_1); // Assuming ENC_L is UNIT_1
+    int16_t dL = snapPCNT(PCNT_UNIT_1);
     encTotalR += dR;
     encTotalL += dL;
     
-    float dt = (lastUpdate > 0) ? (now_ms - lastUpdate) / 1000.0f : 0.01f; // Avoid large dt on first run
+    float dt = (lastUpdate > 0) ? (now_ms - lastUpdate) / 1000.0f : 0.01f;
     if(dt > 0.0001f) {
       updateOdometryAndSpeed(dL, dR, dt);
       if (vwTarget.v != 0.0f || vwTarget.w != 0.0f || pid.outL !=0 || pid.outR !=0 ) {
          pidUpdate(dt, wheelSpeed.left, wheelSpeed.right);
       } else {
-         stopMotors(); // Ensure motors are stopped if targets and outputs are zero
+         stopMotors(); 
       }
     }
     lastUpdate = now_ms;
   }
 
   static uint32_t tStateWs = 0;
-  if(now_ms - tStateWs >= 500) { // Send state over WebSocket at ~2Hz
+  if(now_ms - tStateWs >= 500) { // Send state over WebSocket (~2Hz)
     tStateWs = now_ms;
-    if (ws.count() > 0) { // Only send if there are connected clients
+    if (ws.count() > 0) {
         sendStateOverWebSocket();
     }
-    // Serial logging can be reduced or made conditional
     Serial.printf("Clients: %d, V:%.1f W:%.3f PWM L:%.1f R:%.1f Batt:%.2fV\n", ws.count(), vwTarget.v, vwTarget.w, pid.outL, pid.outR, currentBatteryVoltage);
   }
-  
-  // ws.cleanupClients(); // Periodically remove disconnected clients - handled by library
 }
