@@ -61,7 +61,7 @@ struct VWTarget {
 
 /* ── ПИД-регулятор ───────────────────────────────────*/
 struct PID {
-  float kp = 2.0, ki = 2.5, kd = 0.0, kff = 0.3;
+  float kp = 1.8, ki = 3.8, kd = 0.0, kff = 0.6;
   float sumL = 0, sumR = 0, prevErrL = 0, prevErrR = 0;
   float outL = 0, outR = 0;
   float targetL = 0, targetR = 0; // мм/с
@@ -105,6 +105,13 @@ void loadPIDFromSPIFFS() {
     }
     file.close();
   }
+  Serial.print(pid.kp);
+  Serial.print(" ");
+  Serial.print(pid.ki);
+  Serial.print(" ");
+  Serial.print(pid.kd);
+  Serial.print(" ");
+  Serial.println(pid.kff);
 }
 
 void analogWriteTrack(uint8_t pin, uint8_t duty) {
