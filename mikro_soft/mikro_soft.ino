@@ -7,13 +7,15 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
-#include <AsyncWebSocket.h> // <<< ADDED: For WebSockets
+#include <AsyncWebSocket.h>
 #include "driver/pcnt.h"
 #include <math.h>
 #include <FS.h>
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
 #include "driver/adc.h"
+#include "driver/uart.h"
+#include "esp_task_wdt.h"
 
 /* ── Аппаратные параметры ─────────────────────────────*/
 #define L_A 32
@@ -40,7 +42,117 @@ volatile int32_t encTotalL = 0, encTotalR = 0;
 volatile float currentBatteryVoltage = 0.0f;
 
 AsyncWebServer server(80);
-AsyncWebSocket ws("/ws"); // <<< ADDED: WebSocket endpoint
+AsyncWebSocket ws("/ws"); // Robot WebSocket endpoint
+
+/* ── LIDAR SECTION ───────────────────────────────────*/
+// LIDAR defines
+#define LIDAR_RX_PIN 16
+#define LIDAR_TX_PIN 17
+#define LIDAR_BAUD   115200
+#define LIDAR_BODY_LEN 32
+#define LIDAR_NET_LEN 20
+
+#define LIDAR_WS_PORT 8888
+#define LIDAR_WS_PATH "/ws"
+
+AsyncWebServer lidarServer(LIDAR_WS_PORT);
+AsyncWebSocket lidarWs(LIDAR_WS_PATH);
+
+static QueueHandle_t lidarQueue;      // очередь для обмена с task
+volatile uint32_t lidar_rx_fps = 0, lidar_tx_fps = 0;
+AsyncWebSocketClient* lidarSole = nullptr; // единственный lidar клиент
+
+static const uint8_t LIDAR_HDR[4] = {0x55,0xAA,0x03,0x08};
+static inline float decodeAngle(uint16_t r){
+  float a = (r - 0xA000) / 64.0f;
+  if (a < 0)      a += 360.0f;
+  else if(a>=360) a -= 360.0f;
+  return a;
+}
+static bool readBytesTO(HardwareSerial& s,uint8_t* b,size_t len,uint32_t to=500){
+  uint32_t t0=millis(); size_t got=0;
+  while(got<len){
+    int c=s.read();
+    if(c>=0) b[got++]=uint8_t(c);
+    else     vTaskDelay(1);
+    if(millis()-t0>to) return false;
+    esp_task_wdt_reset();
+  }
+  return true;
+}
+static bool waitHeader(HardwareSerial& s){
+  uint8_t pos=0; uint32_t t0=millis();
+  while(true){
+    int c=s.read();
+    if(c>=0){
+      uint8_t uc=uint8_t(c);
+      if(uc==LIDAR_HDR[pos]){ if(++pos==4) return true; }
+      else pos=0;
+    }else vTaskDelay(1);
+    if(millis()-t0>200) return false;
+    esp_task_wdt_reset();
+  }
+}
+
+void lidarTask(void*) {
+  esp_task_wdt_add(nullptr);
+  Serial1.begin(LIDAR_BAUD,SERIAL_8N1,LIDAR_RX_PIN,LIDAR_TX_PIN);
+  uint8_t body[LIDAR_BODY_LEN], pkt[LIDAR_NET_LEN];
+
+  while(true){
+    if(!waitHeader(Serial1))                 continue;
+    if(!readBytesTO(Serial1,body,LIDAR_BODY_LEN))  continue;
+
+    float sDeg = decodeAngle(body[2] | (body[3]<<8));
+    uint8_t off=4; uint16_t dist[8]; uint8_t inten[8];
+    for(int i=0;i<8;i++){ dist[i]=body[off]|(body[off+1]<<8); inten[i]=body[off+2]; off+=3; }
+    float eDeg = decodeAngle(body[off] | (body[off+1]<<8));
+    if(eDeg<sDeg) eDeg += 360;
+    if(eDeg - sDeg > 20.0) continue;
+
+    uint8_t* p=pkt;
+    uint16_t s=(uint16_t)(sDeg*100+0.5f), e=(uint16_t)(eDeg*100+0.5f);
+    *p++=s; *p++=s>>8; *p++=e; *p++=e>>8;
+    for(int i=0;i<8;i++){ uint16_t d=inten[i]>=2?dist[i]:0; *p++=d; *p++=d>>8; }
+
+    xQueueOverwrite(lidarQueue, pkt);
+    ++lidar_rx_fps;
+  }
+}
+
+void lidarWsTask(void*) {
+  esp_task_wdt_add(nullptr);
+  const TickType_t slot=pdMS_TO_TICKS(5);
+  TickType_t prev=xTaskGetTickCount();
+  uint8_t pkt[LIDAR_NET_LEN];
+
+  for(;;){
+    vTaskDelayUntil(&prev, slot);
+
+    if (lidarSole && lidarSole->canSend() &&
+        xQueueReceive(lidarQueue, pkt, 0) == pdTRUE) {
+      lidarSole->binary(pkt, LIDAR_NET_LEN);
+      ++lidar_tx_fps;
+    }
+    esp_task_wdt_reset();
+  }
+}
+
+void onLidarWsEvent(AsyncWebSocket*, AsyncWebSocketClient* c,
+          AwsEventType t, void*, uint8_t*, size_t){
+  if(t==WS_EVT_CONNECT){
+    if(lidarSole && lidarSole->status()==WS_CONNECTED){
+      Serial.printf("[LIDAR WS] kick old client %u\n", lidarSole->id());
+      lidarSole->close();
+    }
+    lidarSole=c;
+    Serial.printf("[LIDAR WS] + client %u\n", c->id());
+  }
+  if(t==WS_EVT_DISCONNECT && c==lidarSole){
+    lidarSole = nullptr;
+    Serial.printf("[LIDAR WS] - client %u\n", c->id());
+  }
+}
 
 /* ── ОДОМЕТРИЯ ───────────────────────────────────────*/
 struct Odom {
@@ -70,10 +182,9 @@ struct PID {
 const char* PID_CONFIG_FILE = "/pid.json";
 
 /* ── ADDED FOR STRAIGHT DRIVING ──────────────────────*/
-/* Логика компенсации при прямолинейном движении */
-bool straightMode = false;       // Флаг: робот движется по прямой
-int32_t leftBase = 0, rightBase = 0; // Запоминание начальных значений энкодеров
-float KencStraight = 3.0f;       // Коэффициент пропорциональности
+bool straightMode = false;
+int32_t leftBase = 0, rightBase = 0;
+float KencStraight = 3.0f;
 
 float readBatteryVoltage() {
   int adc_raw = adc1_get_raw(ADC1_CHANNEL_3);
@@ -104,7 +215,7 @@ void loadPIDFromSPIFFS() {
   if (file) {
     DynamicJsonDocument doc(256);
     if (deserializeJson(doc, file) == DeserializationError::Ok) {
-      pid.kp = doc["kp"] | pid.kp; // Use current value as default if key missing
+      pid.kp = doc["kp"] | pid.kp;
       pid.ki = doc["ki"] | pid.ki;
       pid.kd = doc["kd"] | pid.kd;
       pid.kff = doc["kff"] | pid.kff;
@@ -168,18 +279,14 @@ void pidUpdate(float dt, float vL, float vR) {
   pid.outL = constrainf(pid.outL, -255, 255);
   pid.outR = constrainf(pid.outR, -255, 255);
 
-  /* ── ADDED FOR STRAIGHT DRIVING ──────────────────────────────*/
-  /* Если мы в режиме прямолинейного движения, корректируем выходы */
   if (straightMode) {
     long diff = (encTotalL - leftBase) - (encTotalR - rightBase);
     float corr = KencStraight * (float)diff;
     pid.outL -= corr * 0.5f;
     pid.outR += corr * 0.5f;
-    // Повторно ограничиваем диапазон
     pid.outL = constrainf(pid.outL, -255, 255);
     pid.outR = constrainf(pid.outR, -255, 255);
   }
-  /* ── END STRAIGHT DRIVING ADDITION ───────────────────────────*/
 
   if (pid.outL > 0) { analogWriteTrack(L_A, (uint8_t)pid.outL); analogWriteTrack(L_B, 0); }
   else { analogWriteTrack(L_A, 0); analogWriteTrack(L_B, (uint8_t)(-pid.outL)); }
@@ -213,8 +320,6 @@ void set_targets_from_vw(float v_mm_s, float w_rad_s) {
   vwTarget.v = v_mm_s;
   vwTarget.w = w_rad_s;
 
-  /* ── ADDED FOR STRAIGHT DRIVING ──────────────────────────────*/
-  // Если задано практически прямолинейное движение (w ~ 0), фиксируем энкодеры
   if (fabs(w_rad_s) < 0.0001f && fabs(v_mm_s) > 0.0001f) {
     if (!straightMode) {
       straightMode = true;
@@ -224,7 +329,6 @@ void set_targets_from_vw(float v_mm_s, float w_rad_s) {
   } else {
     straightMode = false;
   }
-  /* ── END STRAIGHT DRIVING ADDITION ───────────────────────────*/
 }
 
 void update_vw_from_targets() {
@@ -233,10 +337,10 @@ void update_vw_from_targets() {
 }
 
 void sendStateOverWebSocket() {
-  update_vw_from_targets(); // Ensure vwTarget is up-to-date
+  update_vw_from_targets();
   currentBatteryVoltage = readBatteryVoltage();
 
-  char js_buffer[800]; 
+  char js_buffer[800];
   snprintf(js_buffer, sizeof(js_buffer),
     "{\"type\":\"state\","
     "\"duty\":{\"L_A\":%u,\"L_B\":%u,\"R_A\":%u,\"R_B\":%u},"
@@ -250,84 +354,12 @@ void sendStateOverWebSocket() {
     dutyLA, dutyLB, dutyRA, dutyRB, encTotalL, encTotalR,
     odom.x, odom.y, odom.theta, odom.v, odom.w,
     wheelSpeed.left, wheelSpeed.right,
-    pid.kp, pid.ki, pid.kd, pid.kff, 
+    pid.kp, pid.ki, pid.kd, pid.kff,
     vwTarget.v, vwTarget.w,
     pid.outL, pid.outR,
     currentBatteryVoltage
   );
   ws.textAll(js_buffer);
-}
-
-void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
-  AwsFrameInfo *info = (AwsFrameInfo*)arg;
-  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
-    data[len] = 0; // Null-terminate
-    char* msg_payload = (char*)data;
-    Serial.printf("WS Rcv: %s\n", msg_payload);
-
-    DynamicJsonDocument doc(512);
-    DeserializationError error = deserializeJson(doc, msg_payload);
-
-    if (error) {
-      Serial.print(F("deserializeJson() failed: "));
-      Serial.println(error.f_str());
-      return;
-    }
-
-    const char* action = doc["action"];
-    if (!action) {
-        return;
-    }
-    
-    AsyncWebSocketClient *client = (AsyncWebSocketClient*)arg; // This might not be correct context for each library version
-
-    if (strcmp(action, "setVW") == 0) {
-      float v = doc["v"] | 0.0f;
-      float w = doc["w"] | 0.0f;
-      set_targets_from_vw(v, w);
-      if (v == 0.0f && w == 0.0f) {
-          stopMotors(); 
-          pid.targetL = 0; pid.targetR = 0;
-          pid.sumL = 0; pid.sumR = 0;
-          pid.outL = 0; pid.outR = 0;
-      }
-      Serial.println("WS: setVW processed");
-    } else if (strcmp(action, "setPID") == 0) {
-      bool changed = false;
-      if (doc.containsKey("kp")) { pid.kp = doc["kp"]; changed = true; }
-      if (doc.containsKey("ki")) { pid.ki = doc["ki"]; changed = true; }
-      if (doc.containsKey("kd")) { pid.kd = doc["kd"]; changed = true; }
-      if (doc.containsKey("kff")) { pid.kff = doc["kff"]; changed = true; }
-      if (changed) savePIDToSPIFFS();
-      Serial.println("WS: setPID processed");
-    } else if (strcmp(action, "setWheelsSpeed") == 0) {
-      if (doc.containsKey("left"))  pid.targetL = doc["left"];
-      if (doc.containsKey("right")) pid.targetR = doc["right"];
-      update_vw_from_targets();
-      Serial.println("WS: setWheelsSpeed processed");
-    } else if (strcmp(action, "resetAll") == 0) {
-      encTotalL=encTotalR=0;
-      odom = Odom(); wheelSpeed = WheelSpeed();
-      pid.sumL = 0; pid.sumR = 0; pid.prevErrL = 0; pid.prevErrR = 0;
-      pid.outL = 0; pid.outR = 0;
-      pid.targetL = 0; pid.targetR = 0;
-      vwTarget.v = 0; vwTarget.w = 0;
-      stopMotors();
-      pcnt_counter_clear(PCNT_UNIT_0); pcnt_counter_clear(PCNT_UNIT_1);
-      Serial.println("WS: resetAll processed");
-    } else if (strcmp(action, "getPID") == 0) {
-        char js[128];
-        snprintf(js, sizeof(js), "{\"type\":\"pid_coeffs\",\"kp\":%.3f,\"ki\":%.3f,\"kd\":%.3f,\"kff\":%.3f}", pid.kp, pid.ki, pid.kd, pid.kff);
-        Serial.println("WS: getPID processed, response needs client context");
-    } else if (strcmp(action, "getBattery") == 0) {
-        currentBatteryVoltage = readBatteryVoltage();
-        char js[64];
-        snprintf(js, sizeof(js), "{\"type\":\"battery\",\"voltage\":%.2f}", currentBatteryVoltage);
-        Serial.println("WS: getBattery processed, response needs client context");
-    } else {
-        Serial.printf("WS: Unknown action: %s\n", action);
-    }
-  }
 }
 
 void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type, void *arg, uint8_t *data, size_t len) {
@@ -409,17 +441,15 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
   }
 }
 
-
 void setupWiFiAndServer() {
   WiFi.mode(WIFI_STA); WiFi.begin(SSID,PASS);
   Serial.print("Connecting to WiFi");
   while(WiFi.status()!=WL_CONNECTED){ Serial.print('.'); delay(400);}
   Serial.printf("\nIP: %s\n",WiFi.localIP().toString().c_str());
 
-  ws.onEvent(onWsEvent); // Attach WebSocket event handler
-  server.addHandler(&ws); // Add WebSocket handler to the server
+  ws.onEvent(onWsEvent);
+  server.addHandler(&ws);
 
-  // Basic HTTP endpoint for root
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send(200, "text/plain", "ESP32 Robot WebSocket Server is running. Connect to /ws");
   });
@@ -428,9 +458,23 @@ void setupWiFiAndServer() {
   Serial.println("HTTP server and WebSocket server started.");
 }
 
+/* ── LIDAR SERVER SETUP ───────────────────────────── */
+void setupLidarServer() {
+  lidarWs.onEvent(onLidarWsEvent);
+  lidarServer.addHandler(&lidarWs);
+
+  lidarServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "ESP32 Lidar WebSocket Server is running. Connect to /ws");
+  });
+
+  lidarServer.begin();
+  Serial.println("LIDAR HTTP/WebSocket server started (port 8888).");
+}
+
+/* ── MAIN SETUP ───────────────────────────────────── */
 void setup() {
   Serial.begin(115200);
-  delay(1000); // Wait for serial
+  delay(1000);
 
   adc1_config_width(ADC_WIDTH_BIT_12);
   adc1_config_channel_atten(ADC1_CHANNEL_3, ADC_ATTEN_DB_11);
@@ -450,40 +494,64 @@ void setup() {
   setupEncoder(PCNT_UNIT_1,(gpio_num_t)ENC_L_A,(gpio_num_t)ENC_L_B);
 
   setupWiFiAndServer();
+
+  // --- LIDAR: очередь и задачи ---
+  lidarQueue = xQueueCreate(1, LIDAR_NET_LEN);
+  setupLidarServer();
+  xTaskCreatePinnedToCore(lidarTask, "LIDAR", 4096, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(lidarWsTask, "LIDAR_WS_TX", 4096, nullptr, 2, nullptr, 0);
+
   currentBatteryVoltage = readBatteryVoltage();
   Serial.printf("Initial Battery Voltage: %.2f V\n", currentBatteryVoltage);
 }
 
+/* ── LIDAR MONITOR PRINT ──────────────────────────── */
+void printLidarStats() {
+  static uint32_t t0 = 0;
+  static uint32_t last_rx = 0, last_tx = 0;
+  if (millis() - t0 >= 1000) {
+    t0 = millis();
+    uint32_t rx = lidar_rx_fps; lidar_rx_fps = 0;
+    uint32_t tx = lidar_tx_fps; lidar_tx_fps = 0;
+    if (rx > 0 || tx > 0)
+      Serial.printf("[LIDAR] rx:%3u  tx:%3u  client:%s\n", rx, tx, lidarSole ? "yes" : "no");
+    last_rx = rx; last_tx = tx;
+  }
+}
+
 void loop() {
   static uint32_t tEnc=0;
-  static uint32_t lastUpdate = 0; // For dt calculation
+  static uint32_t lastUpdate = 0;
   uint32_t now_ms = millis();
-  
-  if(now_ms - tEnc >= 10){ // Encoder, Odometry, and PID update loop (100Hz)
+
+  if(now_ms - tEnc >= 10){
     tEnc = now_ms;
     int16_t dR = snapPCNT(PCNT_UNIT_0);
     int16_t dL = snapPCNT(PCNT_UNIT_1);
     encTotalR += dR;
     encTotalL += dL;
-    
+
     float dt = (lastUpdate > 0) ? (now_ms - lastUpdate) / 1000.0f : 0.01f;
     if(dt > 0.0001f) {
       updateOdometryAndSpeed(dL, dR, dt);
       if (vwTarget.v != 0.0f || vwTarget.w != 0.0f || pid.outL !=0 || pid.outR !=0 ) {
          pidUpdate(dt, wheelSpeed.left, wheelSpeed.right);
       } else {
-         stopMotors(); 
+         stopMotors();
       }
     }
     lastUpdate = now_ms;
   }
 
   static uint32_t tStateWs = 0;
-  if(now_ms - tStateWs >= 500) { // Send state over WebSocket (~2Hz)
+  if(now_ms - tStateWs >= 500) {
     tStateWs = now_ms;
     if (ws.count() > 0) {
         sendStateOverWebSocket();
     }
     Serial.printf("Clients: %d, V:%.1f W:%.3f PWM L:%.1f R:%.1f Batt:%.2fV\n", ws.count(), vwTarget.v, vwTarget.w, pid.outL, pid.outR, currentBatteryVoltage);
   }
+
+  lidarWs.cleanupClients();
+  printLidarStats();
 }
