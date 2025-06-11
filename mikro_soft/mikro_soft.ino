@@ -28,7 +28,7 @@
 #define BATT_PIN 39
 
 constexpr float WHEEL_RADIUS = 0.0223f; // метры
-constexpr float BASE         = 0.0956f; // метры (ширина между колесами)
+constexpr float BASE         = 0.097f; // метры (ширина между колесами)
 constexpr int   TICKS_PER_TURN = 2936;  // тиков энкодера на оборот
 
 constexpr char SSID[] = "robotx"; // Your WiFi SSID
