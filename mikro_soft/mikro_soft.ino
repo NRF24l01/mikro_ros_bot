@@ -26,8 +26,6 @@
 #define ENC_L_B 34
 
 #define BATT_PIN 39
-const float R1_BATT = 470000.0f;
-const float R2_BATT = 235000.0f;
 
 constexpr float WHEEL_RADIUS = 0.0223f; // метры
 constexpr float BASE         = 0.0956f; // метры (ширина между колесами)
@@ -74,7 +72,7 @@ const char* PID_CONFIG_FILE = "/pid.json";
 float readBatteryVoltage() {
   int adc_raw = adc1_get_raw(ADC1_CHANNEL_3);
   float v_adc_pin = adc_raw * (3.3f / 4095.0f);
-  float v_battery = v_adc_pin * (R1_BATT + R2_BATT) / R2_BATT;
+  float v_battery = v_adc_pin * 3.0f;
   static float last_voltage = v_battery;
   v_battery = (v_battery + last_voltage) / 2.0f;
   last_voltage = v_battery;
