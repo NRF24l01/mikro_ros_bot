@@ -9,6 +9,9 @@ import asyncio
 import websockets 
 import threading
 import json
+from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import TransformStamped
+
 
 def euler_to_quaternion(yaw, pitch=0.0, roll=0.0) -> Quaternion:
     cy = math.cos(yaw * 0.5)
@@ -27,6 +30,8 @@ def euler_to_quaternion(yaw, pitch=0.0, roll=0.0) -> Quaternion:
 class EspControllerNode(Node):
     def __init__(self):
         super().__init__('esp_controller_ws_node')
+        
+        self.tf_broadcaster = TransformBroadcaster(self)
 
         self.declare_parameter('esp_ip_address', '192.168.0.102')
         self.declare_parameter('request_timeout_sec', 0.5)
@@ -173,6 +178,17 @@ class EspControllerNode(Node):
                         odom_msg.twist.twist.angular.y = 0.0
                         odom_msg.twist.twist.angular.z = float(odom_data['w'])
                         self.odom_publisher.publish(odom_msg)
+                        
+                        t = TransformStamped()
+                        t.header.stamp = current_time_msg
+                        t.header.frame_id = self.odom_frame
+                        t.child_frame_id = self.base_frame
+                        t.transform.translation.x = float(odom_data['x'])
+                        t.transform.translation.y = float(odom_data['y'])
+                        t.transform.translation.z = 0.0
+                        t.transform.rotation = odom_msg.pose.pose.orientation
+
+                        self.tf_broadcaster.sendTransform(t)
                     else:
                         self.get_logger().warn(f"Odometry data in 'state' message is missing keys. Received: {odom_data}")
 
