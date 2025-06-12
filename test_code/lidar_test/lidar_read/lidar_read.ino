@@ -75,7 +75,7 @@ static bool waitHeader(HardwareSerial& s){
 
 /* ---------- TASK 1  (Core1) ------------- */
 void lidarTask(void*){
-  esp_task_wdt_add(nullptr);
+  esp_task_wdt_add(NULL); // Регистрируем задачу в WDT
   Serial1.begin(LIDAR_BAUD,SERIAL_8N1,LIDAR_RX_PIN,LIDAR_TX_PIN);
   uint8_t body[BODY_LEN], pkt[NET_LEN];
 
@@ -97,12 +97,13 @@ void lidarTask(void*){
 
     xQueueOverwrite(qFrames, pkt);     // очередь=1, без дропов
     ++fps_rx;
+    esp_task_wdt_reset(); // Сброс WDT именно в этой задаче
   }
 }
 
 /* ---------- TASK 2 (Core0) ------------- */
 void wsTask(void*){
-  esp_task_wdt_add(nullptr);
+  esp_task_wdt_add(NULL); // Регистрируем задачу в WDT
   const TickType_t slot=pdMS_TO_TICKS(5);
   TickType_t prev=xTaskGetTickCount();
   uint8_t pkt[NET_LEN];
@@ -115,7 +116,7 @@ void wsTask(void*){
       sole->binary(pkt, NET_LEN);
       ++fps_tx;
     }
-    esp_task_wdt_reset();
+    esp_task_wdt_reset(); // Сброс WDT именно в этой задаче
   }
 }
 
@@ -149,8 +150,17 @@ void setup(){
   ws.onEvent(onWs); server.addHandler(&ws); server.begin();
 
   qFrames = xQueueCreate(/* length */1, NET_LEN);
-  xTaskCreatePinnedToCore(lidarTask,"LIDAR",4096,nullptr,2,nullptr,1);
-  xTaskCreatePinnedToCore(wsTask,   "WS_TX",4096,nullptr,2,nullptr,0);
+  xTaskCreatePinnedToCore(lidarTask,"LIDAR",4096,NULL,2,NULL,1);
+  xTaskCreatePinnedToCore(wsTask,   "WS_TX",4096,NULL,2,NULL,0);
+
+  // Инициализация и регистрация главной задачи (loop) в WDT
+  esp_task_wdt_config_t wdt_config = {
+    .timeout_ms = 5000,
+    .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+    .trigger_panic = true
+    };
+    esp_task_wdt_init(&wdt_config);
+  esp_task_wdt_add(NULL);     // Регистрируем loop() в WDT
 }
 
 /* ---------- loop ---------- */
@@ -163,5 +173,5 @@ void loop(){
     uint32_t tx=fps_tx; fps_tx=0;
     Serial.printf("[STAT] rx:%3u  tx:%3u\n", rx, tx);
   }
-  esp_task_wdt_reset();
+  esp_task_wdt_reset(); // Сброс WDT для главной задачи
 }
