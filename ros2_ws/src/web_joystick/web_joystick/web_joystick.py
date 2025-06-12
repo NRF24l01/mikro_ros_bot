@@ -174,8 +174,8 @@ HTML_TEMPLATE_WITH_JS = """
             joystickHandle.style.left = (centerX + dx - handleRadius) + 'px';
             joystickHandle.style.top = (centerY + dy - handleRadius) + 'px';
 
-            const normalizedY = parseFloat(-(dy / maxDisplacement).toFixed(2))*0.2; 
-            const normalizedX = parseFloat((dx / maxDisplacement).toFixed(2))*0.2;  
+            const normalizedY = parseFloat(-(dy / maxDisplacement).toFixed(2))*0.5; 
+            const normalizedX = parseFloat((dx / maxDisplacement).toFixed(2))*0.5;  
 
             scheduleJoystickData(normalizedX, normalizedY);
         }
@@ -257,7 +257,7 @@ def handle_joystick_command(data):
 
         twist_msg = Twist()
         twist_msg.linear.x = joystick_y * node_instance.max_linear_speed
-        twist_msg.angular.z = joystick_x * node_instance.max_angular_speed * (-1.0)
+        twist_msg.angular.z = joystick_x * node_instance.max_angular_speed * (-1.0) * 5
 
         node_instance.publisher_cmd_vel.publish(twist_msg)
         
