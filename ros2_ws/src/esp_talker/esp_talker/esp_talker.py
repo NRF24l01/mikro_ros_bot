@@ -225,7 +225,7 @@ class EspControllerNode(Node):
     def cmd_vel_callback(self, msg: Twist):
         current_time_ns = self.get_clock().now().nanoseconds
         
-        if (current_time_ns - self.last_cmd_send_time_ns) >= self.cmd_send_interval_ns:
+        if (current_time_ns - self.last_cmd_send_time_ns) >= self.cmd_send_interval_ns or msg.linear.x == 0 or msg.angular.z == 0:
             v_esp = msg.linear.x * 1000.0 
             w_esp = msg.angular.z         
 
