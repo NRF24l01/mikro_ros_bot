@@ -131,7 +131,7 @@ HTML_TEMPLATE_WITH_JS = """
 
         let isDragging = false;
         let containerRect = joystickContainer.getBoundingClientRect();
-        
+
         function updateContainerRect() {
             containerRect = joystickContainer.getBoundingClientRect();
         }
@@ -142,6 +142,11 @@ HTML_TEMPLATE_WITH_JS = """
         const centerY = joystickContainer.offsetHeight / 2;
         const handleRadius = joystickHandle.offsetWidth / 2;
         const maxDisplacement = centerX - handleRadius;
+
+        let lastSent = 0;
+        let sendInterval = 100; // ms
+        let pending = false;
+        let lastX = 0, lastY = 0;
 
         function getEventCoordinates(event) {
             if (event.touches && event.touches.length > 0) {
@@ -169,14 +174,34 @@ HTML_TEMPLATE_WITH_JS = """
             joystickHandle.style.left = (centerX + dx - handleRadius) + 'px';
             joystickHandle.style.top = (centerY + dy - handleRadius) + 'px';
 
-            const normalizedY = parseFloat(-(dy / maxDisplacement).toFixed(2)); 
-            const normalizedX = parseFloat((dx / maxDisplacement).toFixed(2));  
+            const normalizedY = parseFloat(-(dy / maxDisplacement).toFixed(2))*0.2; 
+            const normalizedX = parseFloat((dx / maxDisplacement).toFixed(2))*0.2;  
 
-            sendJoystickData(normalizedX, normalizedY);
+            scheduleJoystickData(normalizedX, normalizedY);
         }
 
         function sendJoystickData(x, y) {
             socket.emit('joystick_command', { x: x, y: y });
+            lastSent = Date.now();
+        }
+
+        function scheduleJoystickData(x, y) {
+            lastX = x;
+            lastY = y;
+            if (!pending) {
+                const now = Date.now();
+                const elapsed = now - lastSent;
+                if (elapsed >= sendInterval) {
+                    sendJoystickData(lastX, lastY);
+                    pending = false;
+                } else {
+                    pending = true;
+                    setTimeout(() => {
+                        sendJoystickData(lastX, lastY);
+                        pending = false;
+                    }, sendInterval - elapsed);
+                }
+            }
         }
 
         function startDrag(event) {
@@ -198,7 +223,11 @@ HTML_TEMPLATE_WITH_JS = """
                 joystickHandle.style.cursor = 'grab';
                 joystickHandle.style.left = (centerX - handleRadius) + 'px';
                 joystickHandle.style.top = (centerY - handleRadius) + 'px';
+                // Сбросить отложенную отправку и сразу отправить (0,0)
+                lastX = 0;
+                lastY = 0;
                 sendJoystickData(0, 0); 
+                pending = false;
             }
         }
 
