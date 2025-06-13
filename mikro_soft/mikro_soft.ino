@@ -1,10 +1,3 @@
-/****************************************************************
- * ESP32 Robot: PWM + Wi-Fi + AsyncWebServer + AsyncWebSocket + PCNT-энкодеры + ОДОМЕТРИЯ + PID-регулятор + LIDAR (WebSocket, 80 точек/фрейм)
- * Управление и мониторинг по Wi-Fi (JSON API over WebSocket)
- * LIDAR отдаёт отдельный WebSocket поток (порт 8888, 80 точек/фрейм, 1 клиент)
- * PID коэффициенты сохраняются в SPIFFS и загружаются при старте.
- * + Battery Voltage Monitoring
- ****************************************************************/
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
