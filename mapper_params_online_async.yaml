@@ -1,0 +1,31 @@
+slam_toolbox:
+  ros__parameters:
+    # Топики и фреймы (проверьте совпадение с вашей системой)
+    scan_topic:            "/esp/scan"
+    odom_topic:            "/odom"
+    map_frame:             "map"
+    odom_frame:            "odom"
+    base_frame:            "base_footprint"
+    scan_frame:            "laser"
+
+    # Источник одометрии
+    use_sim_time:          false
+    use_odometry:          true
+    use_tf_odometry:       true
+
+    publish_tf: true
+
+    # Синхронизация сканов (очередь подписчика)
+    scan_queue_size:       100
+
+    map_publish_period: 0.5
+
+    max_laser_range: 2.0       # соответствует возможностям вашего лазера
+    min_scan_range: 0.1         # фильтр ближних помех
+    max_scan_range: 2.0        # совпадает с max_laser_range
+    use_scan_matching: true     # включить алгоритм сопоставления сканов
+
+
+    # Параметры TF‑таймаутов
+    transform_timeout:     0.2    # в секундах
+    tf_buffer_duration:    0.5    # длина буфера TF, с учётом задержек
