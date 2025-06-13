@@ -144,11 +144,11 @@ void lidarTask(void*) {
   }
 }
 
-// LIDAR WebSocket Task: отправляет батч клиенту, если есть
+// LIDAR WebSocket Task: отправляет только полный батч (80 точек, 200 байт)
 void lidarWsTask(void*) {
   esp_task_wdt_add(nullptr);
-  const TickType_t slot=pdMS_TO_TICKS(5);
-  TickType_t prev=xTaskGetTickCount();
+  const TickType_t slot = pdMS_TO_TICKS(10); // увеличенный интервал для накопления батча
+  TickType_t prev = xTaskGetTickCount();
   uint8_t batch[LIDAR_NET_LEN * LIDAR_BATCH_COUNT];
 
   for(;;){
@@ -160,8 +160,9 @@ void lidarWsTask(void*) {
              xQueueReceive(lidarQueue, batch + count * LIDAR_NET_LEN, 0) == pdTRUE) {
         count++;
       }
-      if (count > 0) {
-        lidarSole->binary(batch, count * LIDAR_NET_LEN);
+      // Отправляем только если набрали ровно 10 пакетов (80 точек)
+      if (count == LIDAR_BATCH_COUNT) {
+        lidarSole->binary(batch, LIDAR_NET_LEN * LIDAR_BATCH_COUNT);
         lidar_tx_fps += count;
       }
     }
