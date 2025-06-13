@@ -5,10 +5,9 @@ from geometry_msgs.msg import Twist
 import websockets                    # pip install websockets
 import time
 
-# ----- Новый формат: 10 пакетов по 8 точек (20 байт) = 200 байт -----
 PKT_FMT  = "<HHHHHHHHHH"   # 8 точек: start, end, 8 dist
 PKT_SZ   = 20
-SUPERFRAME_SZ = 200        # 10 × 20
+SUPERFRAME_SZ = 200
 
 READ_TIMEOUT   = 1.2
 MIN_FPS        = 2
@@ -30,7 +29,7 @@ class WSBridge(Node):
                    f"{self.get_parameter('port').value}/ws"
 
         # -------- паблишер LaserScan --------
-        self.scan_pub = self.create_publisher(LaserScan, "/scan", 10)
+        self.scan_pub = self.create_publisher(LaserScan, "/esp/scan", 10)
 
         # -------- подписка на /cmd_vel (пока заглушка) --------
         self.cmd_vel_sub = self.create_subscription(
@@ -42,7 +41,6 @@ class WSBridge(Node):
                          args=(loop,), daemon=True).start()
 
     def cmd_vel_cb(self, msg: Twist):
-        # TODO: сформировать бинарный пакет управления роботом
         self.get_logger().debug(
             f"got cmd_vel lin={msg.linear.x:.2f} ang={msg.angular.z:.2f}")
 
@@ -76,14 +74,14 @@ class WSBridge(Node):
                         except asyncio.TimeoutError:
                             pass
                         else:
-                            # Новый формат: 200 байт = 80 точек (10×8)
                             if len(pkt) == SUPERFRAME_SZ:
                                 frames += 1
                                 self.publish_scan_superframe(pkt)
+                                self.get_logger().info("SUPER")
                             elif len(pkt) == PKT_SZ:
-                                # Старый режим (на всякий случай)
                                 frames += 1
                                 self.publish_scan(pkt)
+                                self.get_logger().info("SMALL")
 
                         if (time.time() - t0) >= 1.0:
                             fps = frames
@@ -118,7 +116,6 @@ class WSBridge(Node):
         scan.ranges          = []
         scan.intensities     = []
 
-        # собираем все 10×8=80 точек в один массив
         first_deg = None
         last_deg  = None
         angles    = []
@@ -133,16 +130,13 @@ class WSBridge(Node):
                 first_deg = start_deg
             last_deg = end_deg
 
-            # Углы для этой пачки
             if end_deg < start_deg:
                 end_deg += 360.0
-            # интерполяция углов для 8 точек внутри пакета
             for pt in range(8):
                 angle = start_deg + (end_deg - start_deg) * pt / 7.0
                 angles.append(angle)
                 dists.append(dist_mm[pt])
 
-        # Итоговые параметры LaserScan
         angle_min = math.radians(angles[0])
         angle_max = math.radians(angles[-1])
         angle_inc = (angle_max - angle_min) / (len(angles)-1) if len(angles)>1 else 0.0
@@ -181,6 +175,7 @@ class WSBridge(Node):
             d/1000.0 if d else float('inf') for d in dist_mm]
         scan.intensities     = [0.0]*8
         self.scan_pub.publish(scan)
+
 
 def main(args=None):
     rclpy.init(args=args)

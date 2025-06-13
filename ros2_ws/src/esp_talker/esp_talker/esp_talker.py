@@ -36,7 +36,7 @@ class EspControllerNode(Node):
         self.declare_parameter('esp_ip_address', '192.168.0.102')
         self.declare_parameter('request_timeout_sec', 0.5)
         self.declare_parameter('odom_frame_id', 'odom')
-        self.declare_parameter('base_frame_id', 'base_link')
+        self.declare_parameter('base_frame_id', 'base_footprint')
         self.declare_parameter('cmd_send_interval_ms', 200.0) # New parameter for send interval
 
         self.esp_ip = self.get_parameter('esp_ip_address').get_parameter_value().string_value
