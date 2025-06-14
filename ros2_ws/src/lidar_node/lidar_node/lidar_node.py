@@ -31,7 +31,7 @@ class WSBridge(Node):
         self.url = f"ws://{self.get_parameter('host').value}:" \
                    f"{self.get_parameter('port').value}/ws"
 
-        self.scan_pub = self.create_publisher(LaserScan, "/scan", 10)
+        self.scan_pub = self.create_publisher(LaserScan, "/esp/scan", 10)
         
         loop = asyncio.new_event_loop()
         threading.Thread(target=self.ws_thread,
@@ -93,7 +93,7 @@ class WSBridge(Node):
 
                         if (time.time() - t0) >= 1.0:
                             fps = frames
-                            self.get_logger().info(f"ESP: {fps} пакетов/с")
+                            # self.get_logger().info(f"ESP: {fps} пакетов/с")
                             if fps < MIN_FPS:
                                 low_fps_counter += 1
                                 if low_fps_counter >= LOW_FPS_STREAK:
