@@ -23,11 +23,11 @@
 #define BATT_PIN 39
 
 constexpr float WHEEL_RADIUS = 0.0223f; // метры
-constexpr float BASE         = 0.097f; // метры (ширина между колесами)
+constexpr float BASE         = 0.097f;  // метры (ширина между колесами)
 constexpr int   TICKS_PER_TURN = 2936;  // тиков энкодера на оборот
 
-constexpr char SSID[] = "robotx"; // Your WiFi SSID
-constexpr char PASS[] = "78914040"; // Your WiFi Password
+constexpr char SSID[] = "robotx";       // Your WiFi SSID
+constexpr char PASS[] = "78914040";     // Your WiFi Password
 
 /* ───── Глобальные значения ───────────────────────────── */
 volatile uint8_t dutyLA = 0, dutyLB = 0, dutyRA = 0, dutyRB = 0;
@@ -37,14 +37,13 @@ volatile float currentBatteryVoltage = 0.0f;
 AsyncWebServer server(80);
 AsyncWebSocket ws("/ws"); // Robot WebSocket endpoint
 
-/* ───── LIDAR SECTION (80 точек/фрейм, отдельный сокет) ───── */
+/* ───── LIDAR SECTION (80 точек/фрейм, отдельный сокет, только расстояния) ───── */
 #define LIDAR_RX_PIN 16
 #define LIDAR_TX_PIN 17
 #define LIDAR_BAUD   115200
 #define LIDAR_BODY_LEN 32
-#define LIDAR_NET_LEN 20
-#define LIDAR_BATCH_COUNT 10 // 10 пакетов по 8 точек
-#define LIDAR_FRAME_POINTS 80 // 80 точек/фрейм
+#define LIDAR_POINTS_PER_FRAME 80
+#define LIDAR_FRAME_SZ (4 + 2 * LIDAR_POINTS_PER_FRAME) // 164 байта: 2 угла + 80 дистанций
 
 #define LIDAR_WS_PORT 8888
 #define LIDAR_WS_PATH "/ws"
@@ -52,9 +51,9 @@ AsyncWebSocket ws("/ws"); // Robot WebSocket endpoint
 AsyncWebServer lidarServer(LIDAR_WS_PORT);
 AsyncWebSocket lidarWs(LIDAR_WS_PATH);
 
-static QueueHandle_t lidarQueue;      // очередь для обмена с task (frame batching)
+static QueueHandle_t lidarQueue;
 volatile uint32_t lidar_rx_fps = 0, lidar_tx_fps = 0;
-AsyncWebSocketClient* lidarSole = nullptr; // единственный lidar клиент
+AsyncWebSocketClient* lidarSole = nullptr;
 
 static const uint8_t LIDAR_HDR[4] = {0x55,0xAA,0x03,0x08};
 static const uint8_t LIDAR_INTENSITY_MIN = 2;
@@ -66,7 +65,7 @@ static inline float decodeAngle(uint16_t r){
   else if(a>=360) a -= 360.0f;
   return a;
 }
-static bool readBytesTO(HardwareSerial& s,uint8_t* b,size_t len,uint32_t to=500){
+static bool readBytesTO(HardwareSerial& s, uint8_t* b, size_t len, uint32_t to=500){
   uint32_t t0=millis(); size_t got=0;
   while(got<len){
     int c=s.read();
@@ -91,80 +90,71 @@ static bool waitHeader(HardwareSerial& s){
   }
 }
 
-// LIDAR Task: собирает батч из 10 пакетов (80 точек), кладёт в очередь
+// --- LIDAR task: аккумулирует 80 валидных точек, отправляет одним фреймом (164 байта, только расстояния) ---
 void lidarTask(void*) {
   esp_task_wdt_add(nullptr);
-  Serial1.begin(LIDAR_BAUD,SERIAL_8N1,LIDAR_RX_PIN,LIDAR_TX_PIN);
-  uint8_t pkt[LIDAR_NET_LEN * LIDAR_BATCH_COUNT]; // 10 пакетов по 8 точек
-  int pkt_index = 0;
+  Serial1.begin(LIDAR_BAUD, SERIAL_8N1, LIDAR_RX_PIN, LIDAR_TX_PIN);
+  uint16_t cloud[LIDAR_POINTS_PER_FRAME]; // только дистанции
+  uint8_t nPts = 0;
+  float startDeg = 0, endDeg = 0;
 
   while(true){
-    if(!waitHeader(Serial1))                 continue;
+    if(!waitHeader(Serial1)) continue;
     uint8_t body[LIDAR_BODY_LEN];
-    if(!readBytesTO(Serial1,body,LIDAR_BODY_LEN))  continue;
+    if(!readBytesTO(Serial1, body, LIDAR_BODY_LEN)) continue;
 
     float sDeg = decodeAngle(body[2] | (body[3]<<8));
-    float eDeg = decodeAngle(body[28] | (body[29]<<8));
+    uint8_t off = 4;
+    uint16_t dist[8]; uint8_t inten[8];
+    for(int i=0;i<8;i++){ dist[i]=body[off]|(body[off+1]<<8); inten[i]=body[off+2]; off+=3; }
+    float eDeg = decodeAngle(body[off] | (body[off+1]<<8));
     if(eDeg < sDeg) eDeg += 360.0f;
-    float spread = eDeg - sDeg;
-    if(spread > LIDAR_MAX_SPREAD_DEG) continue;
+    if(eDeg - sDeg > LIDAR_MAX_SPREAD_DEG) continue;
 
-    uint8_t off=4;
-    uint8_t pkt_part[LIDAR_NET_LEN];
-    uint8_t* p=pkt_part;
-
-    uint16_t s=(uint16_t)(sDeg*100+0.5f), e=(uint16_t)(eDeg*100+0.5f);
-    *p++=s; *p++=s>>8; *p++=e; *p++=e>>8;
-
-    int valid_points = 0;
-    for(int i=0;i<8;i++){
-      uint16_t d=body[off]|(body[off+1]<<8);
-      uint8_t inten=body[off+2];
-      off+=3;
-      if(inten>=LIDAR_INTENSITY_MIN){
-        *p++=d; *p++=d>>8;
-        valid_points++;
-      } else {
-        *p++=0; *p++=0;
+    for(int i=0; i<8; i++){
+      if (inten[i] >= LIDAR_INTENSITY_MIN) {
+        if (nPts == 0) startDeg = sDeg;
+        if (nPts < LIDAR_POINTS_PER_FRAME) {
+          cloud[nPts] = dist[i];
+          nPts++;
+        }
       }
+      if (nPts >= LIDAR_POINTS_PER_FRAME) break;
     }
-    if(valid_points==0) continue;
+    endDeg = eDeg;
 
-    memcpy(&pkt[pkt_index], pkt_part, LIDAR_NET_LEN);
-    pkt_index += LIDAR_NET_LEN;
-
-    if(pkt_index >= LIDAR_NET_LEN * LIDAR_BATCH_COUNT){
-      if(uxQueueSpacesAvailable(lidarQueue)>0){
-        xQueueSend(lidarQueue, pkt, 0);
-        ++lidar_rx_fps;
+    if (nPts >= LIDAR_POINTS_PER_FRAME) {
+      // Собираем пакет: start, end, 80 дистанций (uint16)
+      uint8_t pkt[LIDAR_FRAME_SZ];
+      uint8_t* p = pkt;
+      uint16_t s = (uint16_t)(startDeg*100+0.5f), e = (uint16_t)(endDeg*100+0.5f);
+      *p++ = s; *p++ = s >> 8; *p++ = e; *p++ = e >> 8;
+      for(int i=0; i<LIDAR_POINTS_PER_FRAME; i++) {
+        uint16_t d = cloud[i];
+        *p++ = d; *p++ = d >> 8;
       }
-      pkt_index = 0;
+      xQueueOverwrite(lidarQueue, pkt);
+      ++lidar_rx_fps;
+      nPts = 0;
     }
     esp_task_wdt_reset();
   }
 }
 
-// LIDAR WebSocket Task: отправляет только полный батч (80 точек, 200 байт)
+// --- LIDAR WebSocket task: отправляет по 164 байта (80 точек, только дистанции) ---
 void lidarWsTask(void*) {
   esp_task_wdt_add(nullptr);
-  const TickType_t slot = pdMS_TO_TICKS(10); // увеличенный интервал для накопления батча
+  const TickType_t slot = pdMS_TO_TICKS(5);
   TickType_t prev = xTaskGetTickCount();
-  uint8_t batch[LIDAR_NET_LEN * LIDAR_BATCH_COUNT];
+  uint8_t pkt[LIDAR_FRAME_SZ];
 
   for(;;){
     vTaskDelayUntil(&prev, slot);
-
-    if (lidarSole && lidarSole->canSend()) {
-      int count = 0;
-      while (count < LIDAR_BATCH_COUNT &&
-             xQueueReceive(lidarQueue, batch + count * LIDAR_NET_LEN, 0) == pdTRUE) {
-        count++;
-      }
-      // Отправляем только если набрали ровно 10 пакетов (80 точек)
-      if (count == LIDAR_BATCH_COUNT) {
-        lidarSole->binary(batch, LIDAR_NET_LEN * LIDAR_BATCH_COUNT);
-        lidar_tx_fps += count;
-      }
+    if (lidarSole && lidarSole->canSend() &&
+        xQueueReceive(lidarQueue, pkt, 0) == pdTRUE)
+    {
+      lidarSole->binary(pkt, LIDAR_FRAME_SZ);
+      ++lidar_tx_fps;
     }
     esp_task_wdt_reset();
   }
@@ -184,6 +174,19 @@ void onLidarWsEvent(AsyncWebSocket*, AsyncWebSocketClient* c,
     lidarSole = nullptr;
     Serial.printf("[LIDAR WS] - client %u\n", c->id());
   }
+}
+
+// --- LIDAR сервер ---
+void setupLidarServer() {
+  lidarWs.onEvent(onLidarWsEvent);
+  lidarServer.addHandler(&lidarWs);
+
+  lidarServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(200, "text/plain", "ESP32 Lidar WebSocket Server is running. Connect to /ws");
+  });
+
+  lidarServer.begin();
+  Serial.println("LIDAR HTTP/WebSocket server started (port 8888).");
 }
 
 /* ───── ОДОМЕТРИЯ ─────────────────────────────────── */
@@ -487,18 +490,6 @@ void setupWiFiAndServer() {
   Serial.println("HTTP server and WebSocket server started.");
 }
 
-void setupLidarServer() {
-  lidarWs.onEvent(onLidarWsEvent);
-  lidarServer.addHandler(&lidarWs);
-
-  lidarServer.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain", "ESP32 Lidar WebSocket Server is running. Connect to /ws");
-  });
-
-  lidarServer.begin();
-  Serial.println("LIDAR HTTP/WebSocket server started (port 8888).");
-}
-
 /* ───── MAIN SETUP ────────────────────────────────── */
 void setup() {
   Serial.begin(115200);
@@ -524,7 +515,7 @@ void setup() {
   setupWiFiAndServer();
 
   // --- LIDAR: очередь и задачи ---
-  lidarQueue = xQueueCreate(10, LIDAR_NET_LEN * LIDAR_BATCH_COUNT); // 10 батчей максимум
+  lidarQueue = xQueueCreate(1, LIDAR_FRAME_SZ); // очередь из 2 кадров
   setupLidarServer();
   xTaskCreatePinnedToCore(lidarTask, "LIDAR", 4096, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(lidarWsTask, "LIDAR_WS_TX", 4096, nullptr, 2, nullptr, 0);
