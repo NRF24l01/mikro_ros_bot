@@ -1,7 +1,7 @@
 slam_toolbox:
   ros__parameters:
     # Топики и фреймы (проверьте совпадение с вашей системой)
-    scan_topic:            "/esp/scan"
+    scan_topic:            "/scan"
     odom_topic:            "/odom"
     map_frame:             "map"
     odom_frame:            "odom"
