@@ -471,7 +471,7 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
 void setupWiFiAndServer() {
   WiFi.mode(WIFI_STA); WiFi.begin(camConfig.ssid.c_str(),camConfig.password.c_str());
   Serial.print("Connecting to WiFi");
-  while(WiFi.status()!=WL_CONNECTED){ Serial.print('.'); delay(400);}
+  while(WiFi.status()!=WL_CONNECTED){ Serial.print('.'); delay(400); checkSerialConfig();}
   Serial.printf("\nIP: %s\n",WiFi.localIP().toString().c_str());
 
   ws = new AsyncWebSocket("/ws");
@@ -522,7 +522,8 @@ void setup() {
   pinMode(ENC_L_A,INPUT); pinMode(ENC_L_B,INPUT);
   setupEncoder(PCNT_UNIT_0,(gpio_num_t)ENC_R_A,(gpio_num_t)ENC_R_B);
   setupEncoder(PCNT_UNIT_1,(gpio_num_t)ENC_L_A,(gpio_num_t)ENC_L_B);
-
+  
+  checkSerialConfig();
   setupWiFiAndServer();
 
   lidarQueue = xQueueCreate(1, LIDAR_FRAME_SZ);
