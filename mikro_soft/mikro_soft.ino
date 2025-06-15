@@ -12,7 +12,6 @@
 #include "esp_task_wdt.h"
 #include "config.h"
 
-
 /*
 КАК НАСТРОИТЬ?
 
@@ -34,6 +33,10 @@ ssid|password|main_port|lidar_port|client_ip|client_port
 constexpr float WHEEL_RADIUS = 0.0223f;
 constexpr float BASE         = 0.097f;
 constexpr int   TICKS_PER_TURN = 2936;
+
+/* ───── Serial1 TX/RX pins for outgoing config ──────────── */
+#define RXD1 22  // RX для Serial1
+#define TXD1 23  // TX для Serial1
 
 /* ───── Глобальные значения ───────────────────────────── */
 volatile uint8_t dutyLA = 0, dutyLB = 0, dutyRA = 0, dutyRB = 0;
@@ -484,6 +487,18 @@ void setupWiFiAndServer() {
   Serial.printf("HTTP server and WebSocket server started (port %d).\n", camConfig.main_port);
 }
 
+/* ───── Функция для отправки строки с конфигом в Serial1 ───── */
+void sendConfigToSerial1() {
+  // Формат: ssid|password|client_ip|client_port
+  String cfg = camConfig.ssid + "|" + camConfig.password + "|" + camConfig.client_ip + "|" + String(camConfig.client_port);
+  Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1); // RX - 22, TX - 23
+  delay(100);
+  Serial1.println(cfg);
+  Serial.printf("[Config->Serial1] %s\n", cfg.c_str());
+  delay(100); // Дать время на отправку
+  Serial1.end();
+}
+
 /* ───── MAIN SETUP ────────────────────────────────── */
 void setup() {
   Serial.begin(115200);
@@ -518,6 +533,9 @@ void setup() {
   currentBatteryVoltage = readBatteryVoltage();
   Serial.printf("Initial Battery Voltage: %.2f V\n", currentBatteryVoltage);
 
+  // Отправить данные на Serial1 при запуске
+  sendConfigToSerial1();
+
   esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
@@ -546,7 +564,7 @@ void checkSerialConfig() {
         if (camConfig.parseAndSet(line, err)) {
           camConfig.save();
           Serial.println("Config updated, please reboot for changes to take effect.");
-          ESP.reboot();
+          ESP.restart();
         }
         else
         {
