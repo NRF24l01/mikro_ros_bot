@@ -38,14 +38,6 @@ constexpr int   TICKS_PER_TURN = 2936;
 #define RXD1 22  // RX для Serial1
 #define TXD1 23  // TX для Serial1
 
-/* ───── Глобальные значения ───────────────────────────── */
-volatile uint8_t dutyLA = 0, dutyLB = 0, dutyRA = 0, dutyRB = 0;
-volatile int32_t encTotalL = 0, encTotalR = 0;
-volatile float currentBatteryVoltage = 0.0f;
-
-AsyncWebServer* server = nullptr;
-AsyncWebSocket* ws = nullptr;
-
 /* ───── LIDAR SECTION ───── */
 #define LIDAR_RX_PIN 16
 #define LIDAR_TX_PIN 17
@@ -53,6 +45,9 @@ AsyncWebSocket* ws = nullptr;
 #define LIDAR_BODY_LEN 32
 #define LIDAR_POINTS_PER_FRAME 80
 #define LIDAR_FRAME_SZ (4 + 2 * LIDAR_POINTS_PER_FRAME) // 164 байта
+
+AsyncWebServer* server = nullptr;
+AsyncWebSocket* ws = nullptr;
 
 AsyncWebServer* lidarServer = nullptr;
 AsyncWebSocket* lidarWs = nullptr;
@@ -64,6 +59,8 @@ AsyncWebSocketClient* lidarSole = nullptr;
 static const uint8_t LIDAR_HDR[4] = {0x55,0xAA,0x03,0x08};
 static const uint8_t LIDAR_INTENSITY_MIN = 2;
 static const float   LIDAR_MAX_SPREAD_DEG = 20.0;
+
+uint32_t t0 = 0;
 
 static inline float decodeAngle(uint16_t r){
   float a = (r - 0xA000) / 64.0f;
@@ -98,14 +95,14 @@ static bool waitHeader(HardwareSerial& s){
 
 void lidarTask(void*) {
   esp_task_wdt_add(nullptr);
-  Serial1.begin(LIDAR_BAUD, SERIAL_8N1, LIDAR_RX_PIN, LIDAR_TX_PIN);
+  Serial2.begin(LIDAR_BAUD, SERIAL_8N1, LIDAR_RX_PIN, LIDAR_TX_PIN); // Лидар теперь на Serial2
   uint16_t cloud[LIDAR_POINTS_PER_FRAME];
   uint8_t nPts = 0;
   float startDeg = 0, endDeg = 0;
   while(true){
-    if(!waitHeader(Serial1)) continue;
+    if(!waitHeader(Serial2)) continue;
     uint8_t body[LIDAR_BODY_LEN];
-    if(!readBytesTO(Serial1, body, LIDAR_BODY_LEN)) continue;
+    if(!readBytesTO(Serial2, body, LIDAR_BODY_LEN)) continue;
 
     float sDeg = decodeAngle(body[2] | (body[3]<<8));
     uint8_t off = 4;
@@ -187,6 +184,11 @@ void setupLidarServer() {
   lidarServer->begin();
   Serial.printf("LIDAR HTTP/WebSocket server started (port %d).\n", camConfig.lidar_port);
 }
+
+/* ───── Глобальные значения ───────────────────────────── */
+volatile uint8_t dutyLA = 0, dutyLB = 0, dutyRA = 0, dutyRB = 0;
+volatile int32_t encTotalL = 0, encTotalR = 0;
+volatile float currentBatteryVoltage = 0.0f;
 
 /* ───── ОДОМЕТРИЯ и PID ─────────────────────────────────── */
 struct Odom {
@@ -438,7 +440,6 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
                 snprintf(js, sizeof(js), "{\"type\":\"battery\",\"voltage\":%.2f}", currentBatteryVoltage);
                 client->text(js);
             } else if (strcmp(action, "setConfig") == 0) {
-                // { "action": "setConfig", ... }
                 String err;
                 bool changed = false;
                 if (doc.containsKey("ssid")) { camConfig.ssid = String((const char*)doc["ssid"]); changed = true; }
@@ -499,6 +500,41 @@ void sendConfigToSerial1() {
   Serial1.end();
 }
 
+/* ───── LIDAR MONITOR PRINT ───────────────────────── */
+void printLidarStats() {
+  if (millis() - t0 >= 1000) {
+    t0 = millis();
+    uint32_t rx = lidar_rx_fps; lidar_rx_fps = 0;
+    uint32_t tx = lidar_tx_fps; lidar_tx_fps = 0;
+    Serial.printf("[LIDAR] rx:%3u  tx:%3u  client:%s\n", rx, tx, lidarSole ? "yes" : "no");
+  }
+}
+
+/* ───── Чтение конфигурации с Serial ───────────────────────── */
+void checkSerialConfig() {
+  static String line = "";
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (line.length() > 5) {
+        String err;
+        if (camConfig.parseAndSet(line, err)) {
+          camConfig.save();
+          Serial.println("Config updated, please reboot for changes to take effect.");
+          ESP.restart();
+        }
+        else
+        {
+          Serial.print("Config error: "); Serial.println(err);
+        }
+      }
+      line = "";
+    } else {
+      line += c;
+    }
+  }
+}
+
 /* ───── MAIN SETUP ────────────────────────────────── */
 void setup() {
   Serial.begin(115200);
@@ -540,43 +576,6 @@ void setup() {
   esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
-}
-
-/* ───── LIDAR MONITOR PRINT ───────────────────────── */
-void printLidarStats() {
-  static uint32_t t0 = 0;
-  if (millis() - t0 >= 1000) {
-    t0 = millis();
-    uint32_t rx = lidar_rx_fps; lidar_rx_fps = 0;
-    uint32_t tx = lidar_tx_fps; lidar_tx_fps = 0;
-    if (rx > 0 || tx > 0)
-      Serial.printf("[LIDAR] rx:%3u  tx:%3u  client:%s\n", rx, tx, lidarSole ? "yes" : "no");
-  }
-}
-
-/* ───── Чтение конфигурации с Serial ───────────────────────── */
-void checkSerialConfig() {
-  static String line = "";
-  while (Serial.available()) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      if (line.length() > 5) {
-        String err;
-        if (camConfig.parseAndSet(line, err)) {
-          camConfig.save();
-          Serial.println("Config updated, please reboot for changes to take effect.");
-          ESP.restart();
-        }
-        else
-        {
-          Serial.print("Config error: "); Serial.println(err);
-        }
-      }
-      line = "";
-    } else {
-      line += c;
-    }
-  }
 }
 
 void loop() {
