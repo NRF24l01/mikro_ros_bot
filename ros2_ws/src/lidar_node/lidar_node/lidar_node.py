@@ -22,7 +22,7 @@ class WSBridge(Node):
     def __init__(self):
         super().__init__("lidar_ws_bridge")
 
-        self.declare_parameter("host", "192.168.0.103")
+        self.declare_parameter("host", "192.168.0.109")
         self.declare_parameter("port", 8888)
         self.declare_parameter("frame_id", "laser")
         self.declare_parameter("range_min", 0.05)
