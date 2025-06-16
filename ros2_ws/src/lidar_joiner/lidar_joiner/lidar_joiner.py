@@ -9,11 +9,11 @@ class RotationalAssembler(Node):
 
         self.subscription = self.create_subscription(
             LaserScan,
-            '/esp/scan',
+            '/sts/esp/scan',
             self.scan_callback,
             10
         )
-        self.publisher = self.create_publisher(LaserScan, '/scan', 10)
+        self.publisher = self.create_publisher(LaserScan, '/sts/scan', 10)
 
         self.buffer = []
         self.last_processed_angle = None
@@ -43,6 +43,9 @@ class RotationalAssembler(Node):
             self.buffer.clear()
             return
 
+        if angle_max - angle_min == 0:
+            return
+        
         angle_increment = (angle_max - angle_min) / (num_points - 1)
         ranges = [float('nan')] * num_points
 
@@ -54,7 +57,7 @@ class RotationalAssembler(Node):
 
         scan_msg = LaserScan()
         scan_msg.header.stamp = self.get_clock().now().to_msg()
-        scan_msg.header.frame_id = 'laser'
+        scan_msg.header.frame_id = 'sts_laser'
         scan_msg.angle_min = angle_min
         scan_msg.angle_max = angle_max
         scan_msg.angle_increment = angle_increment

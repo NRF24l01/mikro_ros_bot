@@ -6,8 +6,11 @@ import websockets
 import time
 
 # --- tf2 imports ---
-from geometry_msgs.msg import TransformStamped
-from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import Quaternion
+from tf2_ros import (
+    StaticTransformBroadcaster,
+    TransformStamped,
+)
 
 POINTS_PER_PACKET = 80
 FRAME_FMT = "<HH" + "H"*POINTS_PER_PACKET
@@ -18,6 +21,18 @@ MIN_FPS        = 10
 LOW_FPS_STREAK = 3
 MAX_BACKOFF    = 30.0
 
+def rpy_to_quat(roll: float, pitch: float, yaw: float) -> Quaternion:
+    """RPY (рад) → Quaternion"""
+    cy, sy = math.cos(yaw / 2), math.sin(yaw / 2)
+    cp, sp = math.cos(pitch / 2), math.sin(pitch / 2)
+    cr, sr = math.cos(roll / 2), math.sin(roll / 2)
+    q = Quaternion()
+    q.w = cr * cp * cy + sr * sp * sy
+    q.x = sr * cp * cy - cr * sp * sy
+    q.y = cr * sp * cy + sr * cp * sy
+    q.z = cr * cp * sy - sr * sp * cy
+    return q
+
 class WSBridge(Node):
     def __init__(self):
         super().__init__("lidar_ws_bridge")
@@ -27,37 +42,59 @@ class WSBridge(Node):
         self.declare_parameter("frame_id", "laser")
         self.declare_parameter("range_min", 0.05)
         self.declare_parameter("range_max", 16.0)
+        self.declare_parameter("lidar_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter("lidar_rpy_deg", [0.0, 0.0, 0.0])
+        self.declare_parameter("base_frame", "base_frame")
 
         self.url = f"ws://{self.get_parameter('host').value}:" \
                    f"{self.get_parameter('port').value}/ws"
 
-        self.scan_pub = self.create_publisher(LaserScan, "/esp/scan", 10)
+        self.scan_pub = self.create_publisher(LaserScan, "/sts/esp/scan", 10)
         
         loop = asyncio.new_event_loop()
         threading.Thread(target=self.ws_thread,
                          args=(loop,), daemon=True).start()
         
         # -------- добавляем tf broadcaster --------
-        self.tf_broadcaster = TransformBroadcaster(self)
+        self.static_br = StaticTransformBroadcaster(self)
+        self._publish_static_tf()
+
+    def _publish_static_tf(self) -> None:
+        xyz = self.get_parameter("lidar_xyz").value
+        rpy_deg = self.get_parameter("lidar_rpy_deg").value
+
+        roll, pitch, yaw = [math.radians(a) for a in rpy_deg]
+        q = rpy_to_quat(roll, pitch, yaw)
+
+        tf = TransformStamped()
+        tf.header.stamp = self.get_clock().now().to_msg()
+        tf.header.frame_id = self.get_parameter("base_frame").value
+        tf.child_frame_id = self.get_parameter("frame_id").value
+        tf.transform.translation.x = float(xyz[0])
+        tf.transform.translation.y = float(xyz[1])
+        tf.transform.translation.z = float(xyz[2])
+        tf.transform.rotation = q
+
+        # latched – публикуем один раз
+        self.static_br.sendTransform(tf)
+        self.get_logger().info("Published static TF base_link → laser")
+        
+        # tf = TransformStamped()
+        # tf.header.stamp = self.get_clock().now().to_msg()
+        # tf.header.frame_id = "sts_map"
+        # tf.child_frame_id = "sts_odom"
+        # tf.transform.translation.x = 0.0
+        # tf.transform.translation.y = 0.0
+        # tf.transform.translation.z = 0.0
+        # tf.transform.rotation = rpy_to_quat(0.0,0.0,0.0)
+
+        # # latched – публикуем один раз
+        # self.static_br.sendTransform(tf)
+        # self.get_logger().info("Published static TF map → odom")
 
     def ws_thread(self, loop):
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self.ws_loop())
-
-    # --- публикация tf от base_link к лазеру ---
-    def publish_tf(self, stamp_msg):
-        t = TransformStamped()
-        t.header.stamp = stamp_msg
-        t.header.frame_id = "base_footprint"
-        t.child_frame_id = "laser"
-        t.transform.translation.x = 0.0
-        t.transform.translation.y = 0.0
-        t.transform.translation.z = 0.10  # 10 см выше base_link
-        t.transform.rotation.x = 0.0
-        t.transform.rotation.y = 0.0
-        t.transform.rotation.z = 0.0
-        t.transform.rotation.w = 1.0
-        self.tf_broadcaster.sendTransform(t)
     
     async def ws_loop(self):
         backoff          = 1.0
@@ -141,9 +178,6 @@ class WSBridge(Node):
             d/1000.0 if d else float('inf') for d in dist_mm]
         scan.intensities     = [0.0]*POINTS_PER_PACKET
         self.scan_pub.publish(scan)
-        
-        # --- публикуем tf ---
-        self.publish_tf(scan.header.stamp)
 
 def main(args=None):
     rclpy.init(args=args)

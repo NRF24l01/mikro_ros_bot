@@ -4,6 +4,7 @@
         "*.erd": "json",
         "*.vuerd": "json",
         "compare": "cpp",
-        "cstdint": "cpp"
+        "cstdint": "cpp",
+        "cstdlib": "cpp"
     }
 }

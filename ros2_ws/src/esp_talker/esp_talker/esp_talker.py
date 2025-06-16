@@ -55,13 +55,13 @@ class EspControllerNode(Node):
 
         self.cmd_vel_subscriber = self.create_subscription(
             Twist,
-            '/cmd_vel',
+            '/sts/cmd_vel',
             self.cmd_vel_callback,
             10)
 
-        self.battery_publisher = self.create_publisher(Float32, '/battery_voltage', 10)
-        self.odom_publisher = self.create_publisher(Odometry, '/odom', 10)
-        self.connection_status_publisher = self.create_publisher(Bool, '/esp_connection_status', 10)
+        self.battery_publisher = self.create_publisher(Float32, '/sts/battery_voltage', 10)
+        self.odom_publisher = self.create_publisher(Odometry, '/sts/odom', 10)
+        self.connection_status_publisher = self.create_publisher(Bool, '/sts/esp_connection_status', 10)
         
         self.is_ws_connected = False
         self._initial_status_sent = False 
