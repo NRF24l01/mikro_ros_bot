@@ -5,7 +5,7 @@ slam_toolbox:
     scan_topic: /sts/scan              # Топик с лазерными сканами
     odom_frame: sts_odom               # Кадр одометрии (обычно "odom")
     map_frame: sts_map                 # Глобальный фрейм карты
-    base_frame: sts_base_frame         # Фрейм робота (лидара)
+    base_frame: sts_base_link        # Фрейм робота (лидара)
 
     # ⚙️ Режим работы SLAM Toolbox
     mode: mapping                  # Режим построения карты (localization — для использования готовой)
