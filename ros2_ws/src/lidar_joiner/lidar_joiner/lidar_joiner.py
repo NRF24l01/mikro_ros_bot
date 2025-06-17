@@ -7,6 +7,8 @@ class RotationalAssembler(Node):
     def __init__(self):
         super().__init__('rotational_lidar_assembler')
 
+        self.declare_parameter('lidar_mirror', True)  # Новый параметр
+
         self.subscription = self.create_subscription(
             LaserScan,
             '/sts/esp/scan',
@@ -54,6 +56,21 @@ class RotationalAssembler(Node):
             idx = round((angle - angle_min) / angle_increment)
             if 0 <= idx < num_points:
                 ranges[idx] = dist
+
+        # --- РЕВЕРС, если требуется ---
+        if self.get_parameter('lidar_mirror').value:
+            # reverse angles and ranges, change sign of angles
+            ranges = ranges[::-1]
+            # Пересчитаем углы
+            angles_reversed = [angle_min + i * angle_increment for i in range(num_points)][::-1]
+            angles_reversed = [-a for a in angles_reversed]
+            angle_min = min(angles_reversed)
+            angle_max = max(angles_reversed)
+            # Пересчитаем angle_increment (может стать отрицательным, но для последовательности важно abs)
+            if num_points > 1:
+                angle_increment = (angle_max - angle_min) / (num_points - 1)
+            else:
+                angle_increment = 0.0
 
         scan_msg = LaserScan()
         scan_msg.header.stamp = self.get_clock().now().to_msg()
