@@ -270,11 +270,11 @@ def handle_request_initial_esp_status():
 class WebJoystick(Node):
     def __init__(self):
         super().__init__('web_joystick_node')
-        self.publisher_cmd_vel = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.publisher_cmd_vel = self.create_publisher(Twist, '/esp/cmd_vel', 10)
         
         self.esp_status_subscriber = self.create_subscription(
             Bool,
-            '/esp_connection_status',
+            '/esp/esp_connection_status',
             self.esp_status_callback,
             10)
         self.esp_connected_status = False 
@@ -316,7 +316,7 @@ class WebJoystick(Node):
 
 def run_flask_socketio(node_logger):
     host_ip = node_instance.get_ip_address()
-    port = 5000
+    port = 78915
     node_logger.info(f'Веб-сервер (SocketIO) доступен по адресу: http://{host_ip}:{port} и http://localhost:{port}')
     try:
         socketio.run(app, host='0.0.0.0', port=port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True if not (socketio.async_mode == 'eventlet' or socketio.async_mode == 'gevent') else False)
