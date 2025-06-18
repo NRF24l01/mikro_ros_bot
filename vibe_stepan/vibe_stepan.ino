@@ -60,6 +60,14 @@ struct RobotConfig {
              client_ip.c_str(), client_port, telegram_token.c_str(), telegram_user_id.c_str());
     return String(buf);
   }
+  
+  // Новая функция для подготовки сообщения для второй платы
+  String toSecondBoardString() const {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s|%s|%s|%d", 
+             ssid.c_str(), password.c_str(), client_ip.c_str(), client_port);
+    return String(buf);
+  }
 };
 
 RobotConfig robotConfig;
@@ -187,7 +195,8 @@ void handleTelegramMessages() {
       helpMsg += "/status - Get robot status\n";
       helpMsg += "/ip - Get current IP\n";
       helpMsg += "/stop - Emergency stop\n";
-      helpMsg += "/reset - Reset encoders and odometry";
+      helpMsg += "/reset - Reset encoders and odometry\n";
+      helpMsg += "/config - Send config to second board";
       bot->sendMessage(chat_id, helpMsg, "");
     }
     else if (text == "/status") {
@@ -217,6 +226,10 @@ void handleTelegramMessages() {
       pcnt_counter_clear(PCNT_UNIT_0);
       pcnt_counter_clear(PCNT_UNIT_1);
       bot->sendMessage(chat_id, "🔄 Encoders and odometry reset!", "");
+    }
+    else if (text == "/config") {
+      sendConfigToSerial1();
+      bot->sendMessage(chat_id, "📤 Config sent to second board", "");
     }
     else {
       bot->sendMessage(chat_id, "❓ Unknown command. Use /help for available commands.", "");
@@ -266,12 +279,16 @@ inline uint16_t crc16(uint16_t crc, uint8_t v) {
   return crc;
 }
 
-/* ========== Serial1: отправка конфига ========== */
+/* ========== Serial1: отправка конфига для второй платы ========== */
 void sendConfigToSerial1() {
   Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
   delay(100);
-  Serial1.println(robotConfig.toString());
-  Serial.printf("[Config->Serial1] %s\n", robotConfig.toString().c_str());
+  
+  // Отправляем конфиг в новом формате: ssid|password|client_ip|client_port
+  String configMessage = robotConfig.toSecondBoardString();
+  Serial1.println(configMessage);
+  
+  Serial.printf("[Config->Serial1] %s\n", configMessage.c_str());
   delay(100);
   Serial1.end();
 }
@@ -551,10 +568,6 @@ void mainTask(void*) {
     }
     if (ws) ws->cleanupClients();
     if (lidarWs) lidarWs->cleanupClients();
-    if (now - t2000 >= 2000) {
-      t2000 = now;
-      Serial.println(WiFi.localIP());
-    }
     vTaskDelay(1);
     esp_task_wdt_reset();
   }
