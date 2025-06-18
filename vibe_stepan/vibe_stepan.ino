@@ -7,6 +7,8 @@
 #include <ArduinoJson.h>
 #include "driver/pcnt.h"
 #include "esp_task_wdt.h"
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
 
 /* ======== Конфигурация ======== */
 struct RobotConfig {
@@ -16,12 +18,14 @@ struct RobotConfig {
   uint16_t lidar_port = 81;
   String client_ip = "192.168.1.42";
   uint16_t client_port = 9001;
+  String telegram_token = "";
+  String telegram_user_id = "";
 
   void load() {
     if (!SPIFFS.exists("/config.json")) return;
     File f = SPIFFS.open("/config.json", FILE_READ);
     if (!f) return;
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     if (deserializeJson(doc, f) == DeserializationError::Ok) {
       ssid = doc["ssid"] | ssid;
       password = doc["password"] | password;
@@ -29,30 +33,43 @@ struct RobotConfig {
       lidar_port = doc["lidar_port"] | lidar_port;
       client_ip = doc["client_ip"] | client_ip;
       client_port = doc["client_port"] | client_port;
+      telegram_token = doc["telegram_token"] | telegram_token;
+      telegram_user_id = doc["telegram_user_id"] | telegram_user_id;
     }
     f.close();
   }
   void save() const {
     File f = SPIFFS.open("/config.json", FILE_WRITE);
     if (!f) return;
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(1024);
     doc["ssid"] = ssid;
     doc["password"] = password;
     doc["main_port"] = main_port;
     doc["lidar_port"] = lidar_port;
     doc["client_ip"] = client_ip;
     doc["client_port"] = client_port;
+    doc["telegram_token"] = telegram_token;
+    doc["telegram_user_id"] = telegram_user_id;
     serializeJson(doc, f);
     f.close();
   }
   String toString() const {
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s|%s|%d|%d|%s|%d", ssid.c_str(), password.c_str(), main_port, lidar_port, client_ip.c_str(), client_port);
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s|%s|%d|%d|%s|%d|%s|%s", 
+             ssid.c_str(), password.c_str(), main_port, lidar_port, 
+             client_ip.c_str(), client_port, telegram_token.c_str(), telegram_user_id.c_str());
     return String(buf);
   }
 };
 
 RobotConfig robotConfig;
+
+/* ======== Telegram ======== */
+WiFiClientSecure telegramClient;
+UniversalTelegramBot *bot = nullptr;
+volatile bool telegramEnabled = false;
+String serial1Buffer = "";
+volatile uint32_t lastTelegramCheck = 0;
 
 /* ======== Аппаратные параметры ======== */
 #define L_A 32
@@ -109,6 +126,104 @@ AsyncWebSocket *lidarWs = nullptr;
 AsyncWebSocketClient *wsClient = nullptr;
 AsyncWebSocketClient *lidarSole = nullptr;
 
+/* ========== Telegram функции ========== */
+void initTelegram() {
+  if (robotConfig.telegram_token.length() > 0 && robotConfig.telegram_user_id.length() > 0) {
+    telegramClient.setInsecure();
+    bot = new UniversalTelegramBot(robotConfig.telegram_token, telegramClient);
+    telegramEnabled = true;
+    Serial.println("[TELEGRAM] Bot initialized");
+    
+    // Отправляем IP при запуске
+    String startMessage = "🤖 Robot ESP32 started!\n";
+    startMessage += "📍 Local IP: " + WiFi.localIP().toString() + "\n";
+    startMessage += "🔗 Main port: " + String(robotConfig.main_port) + "\n";
+    startMessage += "📡 Lidar port: " + String(robotConfig.lidar_port);
+    
+    sendTelegramMessage(startMessage);
+  } else {
+    Serial.println("[TELEGRAM] Token or User ID not configured");
+  }
+}
+
+void sendTelegramMessage(const String& message) {
+  if (!telegramEnabled || !bot) return;
+  
+  static uint32_t lastSent = 0;
+  uint32_t now = millis();
+  
+  // Ограничиваем частоту отправки (не чаще 1 раза в секунду)
+  if (now - lastSent < 1000) return;
+  lastSent = now;
+  
+  if (bot->sendMessage(robotConfig.telegram_user_id, message, "")) {
+    Serial.println("[TELEGRAM] Message sent: " + message.substring(0, 50) + "...");
+  } else {
+    Serial.println("[TELEGRAM] Failed to send message");
+  }
+}
+
+void handleTelegramMessages() {
+  if (!telegramEnabled || !bot) return;
+  
+  uint32_t now = millis();
+  if (now - lastTelegramCheck < 2000) return; // Проверяем каждые 2 секунды
+  lastTelegramCheck = now;
+  
+  int numNewMessages = bot->getUpdates(bot->last_message_received + 1);
+  
+  for (int i = 0; i < numNewMessages; i++) {
+    String chat_id = String(bot->messages[i].chat_id);
+    if (chat_id != robotConfig.telegram_user_id) {
+      bot->sendMessage(chat_id, "❌ Unauthorized access", "");
+      continue;
+    }
+    
+    String text = bot->messages[i].text;
+    Serial.println("[TELEGRAM] Received: " + text);
+    
+    if (text == "/start" || text == "/help") {
+      String helpMsg = "🤖 Robot ESP32 Commands:\n";
+      helpMsg += "/status - Get robot status\n";
+      helpMsg += "/ip - Get current IP\n";
+      helpMsg += "/stop - Emergency stop\n";
+      helpMsg += "/reset - Reset encoders and odometry";
+      bot->sendMessage(chat_id, helpMsg, "");
+    }
+    else if (text == "/status") {
+      String statusMsg = "📊 Robot Status:\n";
+      statusMsg += "⚡ Motors: L=" + String(tgtL, 1) + " R=" + String(tgtR, 1) + "\n";
+      statusMsg += "🎯 Speed: L=" + String(speedL, 1) + " R=" + String(speedR, 1) + "\n";
+      statusMsg += "📍 Position: X=" + String(odomX, 2) + " Y=" + String(odomY, 2) + "\n";
+      statusMsg += "🧭 Angle: " + String(odomTh * 180.0 / M_PI, 1) + "°";
+      bot->sendMessage(chat_id, statusMsg, "");
+    }
+    else if (text == "/ip") {
+      String ipMsg = "📍 Current IP: " + WiFi.localIP().toString();
+      bot->sendMessage(chat_id, ipMsg, "");
+    }
+    else if (text == "/stop") {
+      tgtL = tgtR = 0;
+      alignMode = false;
+      stopMotors();
+      bot->sendMessage(chat_id, "🛑 Emergency stop activated!", "");
+    }
+    else if (text == "/reset") {
+      encTotL = encTotR = 0;
+      prevEncL = prevEncR = 0;
+      speedL = speedR = 0;
+      odomX = odomY = odomTh = 0;
+      alignMode = false;
+      pcnt_counter_clear(PCNT_UNIT_0);
+      pcnt_counter_clear(PCNT_UNIT_1);
+      bot->sendMessage(chat_id, "🔄 Encoders and odometry reset!", "");
+    }
+    else {
+      bot->sendMessage(chat_id, "❓ Unknown command. Use /help for available commands.", "");
+    }
+  }
+}
+
 /* ========== Вспомогательные функции ========== */
 inline float decodeAngle(uint16_t raw) {
   float a = (raw - 0xA000) / 64.0f;
@@ -161,6 +276,30 @@ void sendConfigToSerial1() {
   Serial1.end();
 }
 
+/* ========== Serial1: чтение данных ========== */
+void checkSerial1Data() {
+  static String line = "";
+  while (Serial1.available()) {
+    char c = Serial1.read();
+    if (c == '\n' || c == '\r') {
+      if (line.length() > 0) {
+        Serial.println("[Serial1] " + line);
+        // Отправляем в Telegram если включен
+        if (telegramEnabled && line.length() > 0) {
+          String telegramMsg = "📡 Serial1: " + line;
+          sendTelegramMessage(telegramMsg);
+        }
+      }
+      line = "";
+    } else if (c >= 32 && c <= 126) { // Только печатные символы
+      line += c;
+      if (line.length() > 200) { // Ограничиваем длину строки
+        line = line.substring(0, 200);
+      }
+    }
+  }
+}
+
 /* ========== Serial: приём конфига ========== */
 void checkSerialConfig() {
   static String line = "";
@@ -168,13 +307,13 @@ void checkSerialConfig() {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
       if (line.length() > 5) {
-        // Формат: ssid|password|main_port|lidar_port|client_ip|client_port
+        // Формат: ssid|password|main_port|lidar_port|client_ip|client_port|telegram_token|telegram_user_id
         int idx = 0, prev = 0;
-        String parts[6];
-        for (int i = 0; i < 6; ++i) {
+        String parts[8];
+        for (int i = 0; i < 8; ++i) {
           idx = line.indexOf('|', prev);
-          if (idx < 0 && i < 5) { break; }
-          parts[i] = line.substring(prev, (i < 5) ? idx : line.length());
+          if (idx < 0 && i < 7) { break; }
+          parts[i] = line.substring(prev, (i < 7) ? idx : line.length());
           prev = idx + 1;
         }
         if (parts[0].length()) robotConfig.ssid = parts[0];
@@ -183,6 +322,8 @@ void checkSerialConfig() {
         if (parts[3].length()) robotConfig.lidar_port = parts[3].toInt();
         if (parts[4].length()) robotConfig.client_ip = parts[4];
         if (parts[5].length()) robotConfig.client_port = parts[5].toInt();
+        if (parts[6].length()) robotConfig.telegram_token = parts[6];
+        if (parts[7].length()) robotConfig.telegram_user_id = parts[7];
         robotConfig.save();
         Serial.println("Config updated, rebooting...");
         delay(200);
@@ -297,7 +438,7 @@ void updatePID() {
 
 /* ========== Лидар Task ========= */
 void lidarTask(void *param) {
-  esp_task_wdt_add(NULL); // Добавляем задачу в WDT!
+  esp_task_wdt_add(NULL);
   Serial2.begin(LIDAR_BAUD, SERIAL_8N1, LIDAR_RX_PIN, LIDAR_TX_PIN);
   uint8_t body[BODY_LEN];
   while (true) {
@@ -357,12 +498,18 @@ void lidarTask(void *param) {
 
 /* ========== Основная Task ========= */
 void mainTask(void*) {
-  esp_task_wdt_add(NULL); // Добавляем задачу в WDT!
+  esp_task_wdt_add(NULL);
   static uint32_t t10 = 0, t20 = 0, t2000 = 0;
   uint32_t now;
+  
+  // Инициализируем Serial1 для чтения
+  Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
+  
   while (true) {
     now = millis();
     checkSerialConfig();
+    checkSerial1Data(); // Проверяем данные от Serial1
+    handleTelegramMessages(); // Обрабатываем Telegram сообщения
 
     if (now - lastCmdMs > 3000) {
       if (tgtL != 0 || tgtR != 0) {
@@ -568,15 +715,13 @@ void setup() {
   Serial.printf("\nWiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
 
   setupWebServers();
+  initTelegram(); // Инициализируем Telegram бота
 
-  // Инициализация WDT до создания тасков!
   esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, .trigger_panic = true };
   esp_task_wdt_init(&wdt_config);
 
   xTaskCreatePinnedToCore(lidarTask, "LidarTask", 4096, nullptr, 2, nullptr, 1);
   xTaskCreatePinnedToCore(mainTask,  "MainTask",  8192, nullptr, 1, nullptr, 0);
-
-  // Не добавляйте esp_task_wdt_add(NULL) в setup или loop!
 }
 
 void loop() {
