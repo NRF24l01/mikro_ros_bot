@@ -1,0 +1,29 @@
+slam_toolbox:
+  ros__parameters:
+    mode: localization
+    map_file_name: "/home/technik12345/mapa"
+    use_sim_time: false
+
+    # --- TF & сканы ---
+    scan_topic: /sts_scan
+    odom_frame: sts_odom
+    map_frame: sts_map
+    base_frame: sts_base_link
+    tf_timeout: 0.3
+    transform_publish_period: 0.03   # 33 Гц
+
+    # --- Источники движения ---
+    use_odometry: false
+    use_imu: false           # true, если есть /imu
+    use_scan_matching: true
+
+    # --- Критерии key-frame ---
+    minimum_travel_distance: 0.05    # м
+    minimum_travel_heading:  0.05    # рад
+    minimum_time_interval:   0.05
+
+    # --- Лидар ---
+    max_laser_range: 2.5
+
+    # --- Пара резервная ---
+    solver_plugin: solver_plugins::CeresSolver
