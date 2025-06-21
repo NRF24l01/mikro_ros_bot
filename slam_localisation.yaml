@@ -5,10 +5,10 @@ slam_toolbox:
     use_sim_time: false
 
     # --- TF & сканы ---
-    scan_topic: /sts/scan
-    odom_frame: sts_odom
-    map_frame: sts_map
-    base_frame: sts_base_link
+    scan_topic: /scan
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
     tf_timeout: 0.3
     transform_publish_period: 0.03   # 33 Гц
 

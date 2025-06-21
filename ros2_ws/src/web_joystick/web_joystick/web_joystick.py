@@ -270,11 +270,11 @@ def handle_request_initial_esp_status():
 class WebJoystick(Node):
     def __init__(self):
         super().__init__('web_joystick_node')
-        self.publisher_cmd_vel = self.create_publisher(Twist, '/esp/cmd_vel', 10)
+        self.publisher_cmd_vel = self.create_publisher(Twist, '/cmd_vel', 10)
         
         self.esp_status_subscriber = self.create_subscription(
             Bool,
-            '/esp/esp_connection_status',
+            '/esp_connection_status',
             self.esp_status_callback,
             10)
         self.esp_connected_status = False 
