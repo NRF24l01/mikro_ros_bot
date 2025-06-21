@@ -1,11 +1,11 @@
 slam_toolbox:
   ros__parameters:
     mode: localization
-    map_file_name: "/home/technik12345/mapa"
+    map_file_name: "/home/technik12345/mapkadacha4"
     use_sim_time: false
 
     # --- TF & сканы ---
-    scan_topic: /sts_scan
+    scan_topic: /sts/scan
     odom_frame: sts_odom
     map_frame: sts_map
     base_frame: sts_base_link
