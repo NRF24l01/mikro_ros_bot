@@ -7,8 +7,6 @@
 #include <ArduinoJson.h>
 #include "driver/pcnt.h"
 #include "esp_task_wdt.h"
-#include <WiFiClientSecure.h>
-#include <UniversalTelegramBot.h>
 
 /* ======== Конфигурация ======== */
 struct RobotConfig {
@@ -18,8 +16,6 @@ struct RobotConfig {
   uint16_t lidar_port = 81;
   String client_ip = "192.168.1.42";
   uint16_t client_port = 9001;
-  String telegram_token = "";
-  String telegram_user_id = "";
 
   void load() {
     if (!SPIFFS.exists("/config.json")) return;
@@ -33,11 +29,10 @@ struct RobotConfig {
       lidar_port = doc["lidar_port"] | lidar_port;
       client_ip = doc["client_ip"] | client_ip;
       client_port = doc["client_port"] | client_port;
-      telegram_token = doc["telegram_token"] | telegram_token;
-      telegram_user_id = doc["telegram_user_id"] | telegram_user_id;
     }
     f.close();
   }
+  
   void save() const {
     File f = SPIFFS.open("/config.json", FILE_WRITE);
     if (!f) return;
@@ -48,36 +43,27 @@ struct RobotConfig {
     doc["lidar_port"] = lidar_port;
     doc["client_ip"] = client_ip;
     doc["client_port"] = client_port;
-    doc["telegram_token"] = telegram_token;
-    doc["telegram_user_id"] = telegram_user_id;
     serializeJson(doc, f);
     f.close();
   }
+  
   String toString() const {
-    char buf[512];
-    snprintf(buf, sizeof(buf), "%s|%s|%d|%d|%s|%d|%s|%s", 
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s|%s|%d|%d|%s|%d", 
              ssid.c_str(), password.c_str(), main_port, lidar_port, 
-             client_ip.c_str(), client_port, telegram_token.c_str(), telegram_user_id.c_str());
+             client_ip.c_str(), client_port);
     return String(buf);
   }
   
-  // Новая функция для подготовки сообщения для второй платы
   String toSecondBoardString() const {
     char buf[256];
-    snprintf(buf, sizeof(buf), "%s|%s|%s|%d", 
-             ssid.c_str(), password.c_str(), client_ip.c_str(), client_port);
+    snprintf(buf, sizeof(buf), "%s|%s", 
+             ssid.c_str(), password.c_str());
     return String(buf);
   }
 };
 
 RobotConfig robotConfig;
-
-/* ======== Telegram ======== */
-WiFiClientSecure telegramClient;
-UniversalTelegramBot *bot = nullptr;
-volatile bool telegramEnabled = false;
-String serial1Buffer = "";
-volatile uint32_t lastTelegramCheck = 0;
 
 /* ======== Аппаратные параметры ======== */
 #define L_A 32
@@ -134,109 +120,6 @@ AsyncWebSocket *lidarWs = nullptr;
 AsyncWebSocketClient *wsClient = nullptr;
 AsyncWebSocketClient *lidarSole = nullptr;
 
-/* ========== Telegram функции ========== */
-void initTelegram() {
-  if (robotConfig.telegram_token.length() > 0 && robotConfig.telegram_user_id.length() > 0) {
-    telegramClient.setInsecure();
-    bot = new UniversalTelegramBot(robotConfig.telegram_token, telegramClient);
-    telegramEnabled = true;
-    Serial.println("[TELEGRAM] Bot initialized");
-    
-    // Отправляем IP при запуске
-    String startMessage = "🤖 Robot ESP32 started!\n";
-    startMessage += "📍 Local IP: " + WiFi.localIP().toString() + "\n";
-    startMessage += "🔗 Main port: " + String(robotConfig.main_port) + "\n";
-    startMessage += "📡 Lidar port: " + String(robotConfig.lidar_port);
-    
-    sendTelegramMessage(startMessage);
-  } else {
-    Serial.println("[TELEGRAM] Token or User ID not configured");
-  }
-}
-
-void sendTelegramMessage(const String& message) {
-  if (!telegramEnabled || !bot) return;
-  
-  static uint32_t lastSent = 0;
-  uint32_t now = millis();
-  
-  // Ограничиваем частоту отправки (не чаще 1 раза в секунду)
-  if (now - lastSent < 1000) return;
-  lastSent = now;
-  
-  if (bot->sendMessage(robotConfig.telegram_user_id, message, "")) {
-    Serial.println("[TELEGRAM] Message sent: " + message.substring(0, 50) + "...");
-  } else {
-    Serial.println("[TELEGRAM] Failed to send message");
-  }
-}
-
-void handleTelegramMessages() {
-  if (!telegramEnabled || !bot) return;
-  
-  uint32_t now = millis();
-  if (now - lastTelegramCheck < 2000) return; // Проверяем каждые 2 секунды
-  lastTelegramCheck = now;
-  
-  int numNewMessages = bot->getUpdates(bot->last_message_received + 1);
-  
-  for (int i = 0; i < numNewMessages; i++) {
-    String chat_id = String(bot->messages[i].chat_id);
-    if (chat_id != robotConfig.telegram_user_id) {
-      bot->sendMessage(chat_id, "❌ Unauthorized access", "");
-      continue;
-    }
-    
-    String text = bot->messages[i].text;
-    Serial.println("[TELEGRAM] Received: " + text);
-    
-    if (text == "/start" || text == "/help") {
-      String helpMsg = "🤖 Robot ESP32 Commands:\n";
-      helpMsg += "/status - Get robot status\n";
-      helpMsg += "/ip - Get current IP\n";
-      helpMsg += "/stop - Emergency stop\n";
-      helpMsg += "/reset - Reset encoders and odometry\n";
-      helpMsg += "/config - Send config to second board";
-      bot->sendMessage(chat_id, helpMsg, "");
-    }
-    else if (text == "/status") {
-      String statusMsg = "📊 Robot Status:\n";
-      statusMsg += "⚡ Motors: L=" + String(tgtL, 1) + " R=" + String(tgtR, 1) + "\n";
-      statusMsg += "🎯 Speed: L=" + String(speedL, 1) + " R=" + String(speedR, 1) + "\n";
-      statusMsg += "📍 Position: X=" + String(odomX, 2) + " Y=" + String(odomY, 2) + "\n";
-      statusMsg += "🧭 Angle: " + String(odomTh * 180.0 / M_PI, 1) + "°";
-      bot->sendMessage(chat_id, statusMsg, "");
-    }
-    else if (text == "/ip") {
-      String ipMsg = "📍 Current IP: " + WiFi.localIP().toString();
-      bot->sendMessage(chat_id, ipMsg, "");
-    }
-    else if (text == "/stop") {
-      tgtL = tgtR = 0;
-      alignMode = false;
-      stopMotors();
-      bot->sendMessage(chat_id, "🛑 Emergency stop activated!", "");
-    }
-    else if (text == "/reset") {
-      encTotL = encTotR = 0;
-      prevEncL = prevEncR = 0;
-      speedL = speedR = 0;
-      odomX = odomY = odomTh = 0;
-      alignMode = false;
-      pcnt_counter_clear(PCNT_UNIT_0);
-      pcnt_counter_clear(PCNT_UNIT_1);
-      bot->sendMessage(chat_id, "🔄 Encoders and odometry reset!", "");
-    }
-    else if (text == "/config") {
-      sendConfigToSerial1();
-      bot->sendMessage(chat_id, "📤 Config sent to second board", "");
-    }
-    else {
-      bot->sendMessage(chat_id, "❓ Unknown command. Use /help for available commands.", "");
-    }
-  }
-}
-
 /* ========== Вспомогательные функции ========== */
 inline float decodeAngle(uint16_t raw) {
   float a = (raw - 0xA000) / 64.0f;
@@ -244,6 +127,7 @@ inline float decodeAngle(uint16_t raw) {
   else if (a >= 360) a -= 360.0f;
   return a;
 }
+
 bool readBytes(HardwareSerial &serial, uint8_t *dst, size_t n, uint32_t timeout = 300) {
   uint32_t t0 = millis();
   for (size_t i = 0; i < n; ++i) {
@@ -256,6 +140,7 @@ bool readBytes(HardwareSerial &serial, uint8_t *dst, size_t n, uint32_t timeout 
   }
   return true;
 }
+
 bool waitLidarHeader(HardwareSerial &serial) {
   uint8_t pos = 0;
   uint32_t t0 = millis();
@@ -271,6 +156,7 @@ bool waitLidarHeader(HardwareSerial &serial) {
     esp_task_wdt_reset();
   }
 }
+
 inline uint16_t crc16(uint16_t crc, uint8_t v) {
   crc ^= v;
   for (uint8_t i = 0; i < 8; ++i) {
@@ -284,7 +170,6 @@ void sendConfigToSerial1() {
   Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
   delay(100);
   
-  // Отправляем конфиг в новом формате: ssid|password|client_ip|client_port
   String configMessage = robotConfig.toSecondBoardString();
   Serial1.println(configMessage);
   
@@ -301,16 +186,11 @@ void checkSerial1Data() {
     if (c == '\n' || c == '\r') {
       if (line.length() > 0) {
         Serial.println("[Serial1] " + line);
-        // Отправляем в Telegram если включен
-        if (telegramEnabled && line.length() > 0) {
-          String telegramMsg = "📡 Serial1: " + line;
-          sendTelegramMessage(telegramMsg);
-        }
       }
       line = "";
-    } else if (c >= 32 && c <= 126) { // Только печатные символы
+    } else if (c >= 32 && c <= 126) {
       line += c;
-      if (line.length() > 200) { // Ограничиваем длину строки
+      if (line.length() > 200) {
         line = line.substring(0, 200);
       }
     }
@@ -324,13 +204,12 @@ void checkSerialConfig() {
     char c = Serial.read();
     if (c == '\n' || c == '\r') {
       if (line.length() > 5) {
-        // Формат: ssid|password|main_port|lidar_port|client_ip|client_port|telegram_token|telegram_user_id
         int idx = 0, prev = 0;
-        String parts[8];
-        for (int i = 0; i < 8; ++i) {
+        String parts[6];
+        for (int i = 0; i < 6; ++i) {
           idx = line.indexOf('|', prev);
-          if (idx < 0 && i < 7) { break; }
-          parts[i] = line.substring(prev, (i < 7) ? idx : line.length());
+          if (idx < 0 && i < 5) { break; }
+          parts[i] = line.substring(prev, (i < 5) ? idx : line.length());
           prev = idx + 1;
         }
         if (parts[0].length()) robotConfig.ssid = parts[0];
@@ -339,8 +218,6 @@ void checkSerialConfig() {
         if (parts[3].length()) robotConfig.lidar_port = parts[3].toInt();
         if (parts[4].length()) robotConfig.client_ip = parts[4];
         if (parts[5].length()) robotConfig.client_port = parts[5].toInt();
-        if (parts[6].length()) robotConfig.telegram_token = parts[6];
-        if (parts[7].length()) robotConfig.telegram_user_id = parts[7];
         robotConfig.save();
         Serial.println("Config updated, rebooting...");
         delay(200);
@@ -372,6 +249,7 @@ void pcntInit(pcnt_unit_t unit, gpio_num_t pulse_pin, gpio_num_t ctrl_pin) {
   pcnt_counter_clear(unit);
   pcnt_counter_resume(unit);
 }
+
 inline int16_t readEncoder(pcnt_unit_t unit) {
   int16_t count = 0;
   pcnt_get_counter_value(unit, &count);
@@ -389,6 +267,7 @@ inline void setPWM(uint8_t pin, uint8_t value) {
     case R_B: dutyRB = value; break;
   }
 }
+
 inline void stopMotors() {
   setPWM(L_A, 0);
   setPWM(L_B, 0);
@@ -513,20 +392,64 @@ void lidarTask(void *param) {
   }
 }
 
+/* ========== Отправка состояния робота по WebSocket ========== */
+void sendRobotState() {
+  if (!wsClient || wsClient->status() != WS_CONNECTED) return;
+  
+  DynamicJsonDocument doc(1024);
+  doc["type"] = "state";
+  
+  JsonObject duty = doc.createNestedObject("duty");
+  duty["L_A"] = dutyLA;
+  duty["L_B"] = dutyLB;
+  duty["R_A"] = dutyRA;
+  duty["R_B"] = dutyRB;
+  
+  JsonObject enc = doc.createNestedObject("enc");
+  enc["left"] = encTotL;
+  enc["right"] = encTotR;
+  
+  JsonObject speed = doc.createNestedObject("speed");
+  speed["left"] = speedL;
+  speed["right"] = speedR;
+  
+  JsonObject target = doc.createNestedObject("target");
+  target["left"] = tgtL;
+  target["right"] = tgtR;
+  
+  JsonObject odom = doc.createNestedObject("odom");
+  odom["x"] = odomX;
+  odom["y"] = odomY;
+  odom["th"] = odomTh;
+  
+  JsonObject pid = doc.createNestedObject("pid");
+  pid["kp"] = kp;
+  pid["ki"] = ki;
+  pid["kd"] = kd;
+  pid["kff"] = kff;
+  
+  doc["align_mode"] = alignMode;
+  doc["uptime"] = millis();
+  
+  String message;
+  serializeJson(doc, message);
+  wsClient->text(message);
+}
+
 /* ========== Основная Task ========= */
 void mainTask(void*) {
   esp_task_wdt_add(NULL);
-  static uint32_t t10 = 0, t20 = 0, t2000 = 0;
+  static uint32_t t10 = 0, t20 = 0, t100 = 0;
   uint32_t now;
   
-  // Инициализируем Serial1 для чтения
   Serial1.begin(115200, SERIAL_8N1, RXD1, TXD1);
   
   while (true) {
     now = millis();
+    esp_task_wdt_reset();
+    
     checkSerialConfig();
-    checkSerial1Data(); // Проверяем данные от Serial1
-    handleTelegramMessages(); // Обрабатываем Telegram сообщения
+    checkSerial1Data();
 
     if (now - lastCmdMs > 3000) {
       if (tgtL != 0 || tgtR != 0) {
@@ -536,6 +459,7 @@ void mainTask(void*) {
         Serial.println("[SAFE] cmd timeout → STOP");
       }
     }
+    
     if (now - t10 >= 10) {
       t10 = now;
       int16_t dR = readEncoder(PCNT_UNIT_0);
@@ -553,6 +477,7 @@ void mainTask(void*) {
       if (odomTh > M_PI) odomTh -= 2 * M_PI;
       if (odomTh < -M_PI) odomTh += 2 * M_PI;
     }
+    
     if (now - t20 >= 20) {
       float dt = (now - t20) * 0.001f;
       t20 = now;
@@ -561,15 +486,22 @@ void mainTask(void*) {
       prevEncL = encTotL;
       prevEncR = encTotR;
     }
+    
+    // Отправка состояния робота каждые 100ms
+    if (now - t100 >= 100) {
+      t100 = now;
+      sendRobotState();
+    }
+    
     static uint32_t tPID = 0;
     if (now - tPID >= 20) {
       tPID = now;
       updatePID();
     }
+    
     if (ws) ws->cleanupClients();
     if (lidarWs) lidarWs->cleanupClients();
     vTaskDelay(1);
-    esp_task_wdt_reset();
   }
 }
 
@@ -580,6 +512,16 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     wsClient = client;
     wsClient->client()->setNoDelay(true);
     Serial.printf("[WS] Client #%u connected\n", client->id());
+    
+    // Отправляем приветственное сообщение
+    DynamicJsonDocument doc(256);
+    doc["type"] = "connected";
+    doc["message"] = "Robot WebSocket connected";
+    doc["version"] = "1.0";
+    String message;
+    serializeJson(doc, message);
+    client->text(message);
+    
   } else if (type == WS_EVT_DISCONNECT) {
     if (client == wsClient) {
       wsClient = nullptr;
@@ -587,12 +529,15 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
     }
   } else if (type == WS_EVT_DATA) {
     AwsFrameInfo *info = (AwsFrameInfo *)arg;
+    
     if (info->opcode == WS_BINARY && len == 4) {
+      // Бинарная команда управления скоростями (совместимость со старой версией)
       int16_t left = data[0] | (data[1] << 8);
       int16_t right = data[2] | (data[3] << 8);
       tgtL = (float)left;
       tgtR = (float)right;
       lastCmdMs = millis();
+      
       if (fabs(fabs(tgtL) - fabs(tgtR)) < 1.0f && fabs(tgtL) > 1.0f) {
         alignMode = true;
         alignSign = (tgtL * tgtR >= 0) ? 1.0f : -1.0f;
@@ -601,10 +546,135 @@ void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventTyp
       } else {
         alignMode = false;
       }
-      Serial.printf("[WS] Cmd: left=%d, right=%d\n", left, right);
+      Serial.printf("[WS] Binary cmd: left=%d, right=%d\n", left, right);
+      
+    } else if (info->opcode == WS_TEXT) {
+      // JSON команды
+      String message = String((char*)data).substring(0, len);
+      DynamicJsonDocument doc(512);
+      
+      if (deserializeJson(doc, message) == DeserializationError::Ok) {
+        String type = doc["type"];
+        
+        if (type == "setSpeed") {
+          if (doc.containsKey("left")) tgtL = doc["left"];
+          if (doc.containsKey("right")) tgtR = doc["right"];
+          lastCmdMs = millis();
+          
+          if (fabs(fabs(tgtL) - fabs(tgtR)) < 1.0f && fabs(tgtL) > 1.0f) {
+            alignMode = true;
+            alignSign = (tgtL * tgtR >= 0) ? 1.0f : -1.0f;
+            alignRefL = encTotL;
+            alignRefR = encTotR;
+          } else {
+            alignMode = false;
+          }
+          
+          // Отправляем подтверждение
+          DynamicJsonDocument response(256);
+          response["type"] = "ack";
+          response["command"] = "setSpeed";
+          response["left"] = tgtL;
+          response["right"] = tgtR;
+          String ack;
+          serializeJson(response, ack);
+          client->text(ack);
+          
+          Serial.printf("[WS] Speed cmd: left=%.1f, right=%.1f\n", tgtL, tgtR);
+          
+        } else if (type == "setCoeff") {
+          if (doc.containsKey("kp")) kp = doc["kp"];
+          if (doc.containsKey("ki")) ki = doc["ki"];
+          if (doc.containsKey("kd")) kd = doc["kd"];
+          if (doc.containsKey("kff")) kff = doc["kff"];
+          
+          // Отправляем подтверждение
+          DynamicJsonDocument response(256);
+          response["type"] = "ack";
+          response["command"] = "setCoeff";
+          response["kp"] = kp;
+          response["ki"] = ki;
+          response["kd"] = kd;
+          response["kff"] = kff;
+          String ack;
+          serializeJson(response, ack);
+          client->text(ack);
+          
+          Serial.printf("[WS] PID coeffs: kp=%.3f, ki=%.3f, kd=%.3f, kff=%.3f\n", kp, ki, kd, kff);
+          
+        } else if (type == "resetEnc") {
+          encTotL = encTotR = 0;
+          prevEncL = prevEncR = 0;
+          speedL = speedR = 0;
+          alignMode = false;
+          pcnt_counter_clear(PCNT_UNIT_0);
+          pcnt_counter_clear(PCNT_UNIT_1);
+          
+          // Отправляем подтверждение
+          DynamicJsonDocument response(256);
+          response["type"] = "ack";
+          response["command"] = "resetEnc";
+          String ack;
+          serializeJson(response, ack);
+          client->text(ack);
+          
+          Serial.println("[WS] Encoders reset");
+          
+        } else if (type == "resetOdom") {
+          odomX = odomY = odomTh = 0;
+          
+          // Отправляем подтверждение
+          DynamicJsonDocument response(256);
+          response["type"] = "ack";
+          response["command"] = "resetOdom";
+          String ack;
+          serializeJson(response, ack);
+          client->text(ack);
+          
+          Serial.println("[WS] Odometry reset");
+          
+        } else if (type == "getState") {
+          // Немедленно отправляем состояние
+          sendRobotState();
+          
+        } else if (type == "stop") {
+          tgtL = tgtR = 0;
+          alignMode = false;
+          stopMotors();
+          lastCmdMs = millis();
+          
+          // Отправляем подтверждение
+          DynamicJsonDocument response(256);
+          response["type"] = "ack";
+          response["command"] = "stop";
+          String ack;
+          serializeJson(response, ack);
+          client->text(ack);
+          
+          Serial.println("[WS] Emergency stop");
+          
+        } else {
+          // Неизвестная команда
+          DynamicJsonDocument response(256);
+          response["type"] = "error";
+          response["message"] = "Unknown command: " + type;
+          String error;
+          serializeJson(response, error);
+          client->text(error);
+        }
+      } else {
+        // Ошибка парсинга JSON
+        DynamicJsonDocument response(256);
+        response["type"] = "error";
+        response["message"] = "Invalid JSON format";
+        String error;
+        serializeJson(response, error);
+        client->text(error);
+      }
     }
   }
 }
+
 void onLidarWsEvent(AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, void*, uint8_t*, size_t){
   if(t==WS_EVT_CONNECT){
     if(lidarSole && lidarSole->status()==WS_CONNECTED){
@@ -619,59 +689,79 @@ void onLidarWsEvent(AsyncWebSocket*, AsyncWebSocketClient* c, AwsEventType t, vo
   }
 }
 
-/* ========== HTTP-роуты ========= */
+/* ========== HTTP-роуты (минимальные для совместимости) ========= */
 void setupRoutes() {
-  server->on("/state", HTTP_GET, [](AsyncWebServerRequest *request) {
-    char json[512];
-    snprintf(json, sizeof(json),
-             "{\"duty\":{\"L_A\":%u,\"L_B\":%u,\"R_A\":%u,\"R_B\":%u},"
-             "\"enc\":{\"left\":%ld,\"right\":%ld},"
-             "\"speed\":{\"left\":%.1f,\"right\":%.1f},"
-             "\"target\":{\"left\":%.1f,\"right\":%.1f},"
-             "\"odom\":{\"x\":%.3f,\"y\":%.3f,\"th\":%.3f}}",
-             dutyLA, dutyLB, dutyRA, dutyRB,
-             encTotL, encTotR,
-             speedL, speedR, tgtL, tgtR,
-             odomX, odomY, odomTh);
-    request->send(200, "application/json", json);
-  });
-  server->on("/setSpeed", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (request->hasParam("l")) tgtL = request->getParam("l")->value().toFloat();
-    if (request->hasParam("r")) tgtR = request->getParam("r")->value().toFloat();
-    lastCmdMs = millis();
-    if (fabs(fabs(tgtL) - fabs(tgtR)) < 1.0f && fabs(tgtL) > 1.0f) {
-      alignMode = true;
-      alignSign = (tgtL * tgtR >= 0) ? 1.0f : -1.0f;
-      alignRefL = encTotL;
-      alignRefR = encTotR;
-    } else {
-      alignMode = false;
-    }
-    request->send(200, "text/plain", "ok");
-  });
-  server->on("/setCoeff", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (request->hasParam("kp")) kp = request->getParam("kp")->value().toFloat();
-    if (request->hasParam("ki")) ki = request->getParam("ki")->value().toFloat();
-    if (request->hasParam("kd")) kd = request->getParam("kd")->value().toFloat();
-    if (request->hasParam("kff")) kff = request->getParam("kff")->value().toFloat();
-    request->send(200, "text/plain", "ok");
-  });
-  server->on("/resetEnc", HTTP_GET, [](AsyncWebServerRequest *request) {
-    encTotL = encTotR = 0;
-    prevEncL = prevEncR = 0;
-    speedL = speedR = 0;
-    alignMode = false;
-    pcnt_counter_clear(PCNT_UNIT_0);
-    pcnt_counter_clear(PCNT_UNIT_1);
-    request->send(200, "text/plain", "enc reset");
-  });
-  server->on("/resetOdom", HTTP_GET, [](AsyncWebServerRequest *request) {
-    odomX = odomY = odomTh = 0;
-    request->send(200, "text/plain", "odom reset");
-  });
+  // Главная страница с информацией о WebSocket API
   server->on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain",
-                  "Endpoints: /state /setSpeed /setCoeff /resetEnc /resetOdom");
+    String html = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Robot WebSocket API</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .command { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        code { background: #e8e8e8; padding: 2px 5px; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <h1>Robot WebSocket API</h1>
+    <p>Connect to WebSocket: <code>ws://)" + WiFi.localIP().toString() + R"(:)" + String(robotConfig.main_port) + R"(/ws</code></p>
+    
+    <h2>Commands (JSON format):</h2>
+    
+    <div class="command">
+        <h3>Set Speed</h3>
+        <code>{"type": "setSpeed", "left": 100.0, "right": 100.0}</code>
+    </div>
+    
+    <div class="command">
+        <h3>Set PID Coefficients</h3>
+        <code>{"type": "setCoeff", "kp": 1.0, "ki": 0.8, "kd": 0.02, "kff": 0.25}</code>
+    </div>
+    
+    <div class="command">
+        <h3>Reset Encoders</h3>
+        <code>{"type": "resetEnc"}</code>
+    </div>
+    
+    <div class="command">
+        <h3>Reset Odometry</h3>
+        <code>{"type": "resetOdom"}</code>
+    </div>
+    
+    <div class="command">
+        <h3>Get Current State</h3>
+        <code>{"type": "getState"}</code>
+    </div>
+    
+    <div class="command">
+        <h3>Emergency Stop</h3>
+        <code>{"type": "stop"}</code>
+    </div>
+    
+    <h2>Legacy Binary Command:</h2>
+    <p>4 bytes: [left_low, left_high, right_low, right_high] (int16 values)</p>
+    
+    <h2>State Updates:</h2>
+    <p>Robot automatically sends state updates every 100ms with type "state"</p>
+</body>
+</html>
+    )";
+    request->send(200, "text/html", html);
+  });
+  
+  // Базовый API endpoint для проверки состояния
+  server->on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    DynamicJsonDocument doc(256);
+    doc["status"] = "ok";
+    doc["websocket_url"] = "ws://" + WiFi.localIP().toString() + ":" + String(robotConfig.main_port) + "/ws";
+    doc["uptime"] = millis();
+    doc["clients"] = ws ? ws->count() : 0;
+    
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
   });
 }
 
@@ -693,7 +783,8 @@ void setupWebServers() {
   });
   lidarServer->begin();
 
-  Serial.printf("HTTP/WebSocket server started (main: %d, lidar: %d).\n", robotConfig.main_port, robotConfig.lidar_port);
+  Serial.printf("WebSocket servers started (main: %d, lidar: %d).\n", robotConfig.main_port, robotConfig.lidar_port);
+  Serial.printf("Main WebSocket URL: ws://%s:%d/ws\n", WiFi.localIP().toString().c_str(), robotConfig.main_port);
 }
 
 /* ========== setup ========== */
@@ -728,15 +819,21 @@ void setup() {
   Serial.printf("\nWiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
 
   setupWebServers();
-  initTelegram(); // Инициализируем Telegram бота
 
-  esp_task_wdt_config_t wdt_config = { .timeout_ms = 5000, .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, .trigger_panic = true };
+  // Настройка watchdog
+  esp_task_wdt_config_t wdt_config = { 
+    .timeout_ms = 5000,
+    .idle_core_mask = (1 << portNUM_PROCESSORS) - 1, 
+    .trigger_panic = true 
+  };
   esp_task_wdt_init(&wdt_config);
 
-  xTaskCreatePinnedToCore(lidarTask, "LidarTask", 4096, nullptr, 2, nullptr, 1);
-  xTaskCreatePinnedToCore(mainTask,  "MainTask",  8192, nullptr, 1, nullptr, 0);
+  // Создаем основные задачи
+  xTaskCreatePinnedToCore(lidarTask, "LidarTask", 4096, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(mainTask,  "MainTask",  8192, nullptr, 3, nullptr, 0);
 }
 
 void loop() {
   // Вся логика в задачах
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
 }
