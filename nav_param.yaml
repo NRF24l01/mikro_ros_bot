@@ -38,7 +38,7 @@ controller_server:
       use_rotate_to_heading:    false        # запрещаем отдельный pivot-разворот
 
       # --- скорость ---
-      desired_linear_vel:       0.08         # м/с
+      desired_linear_vel:       0.1         # м/с
       max_robot_angular_vel:    1.8          # рад/с
       max_angular_accel:        2.0          # рад/с²
       regulate_turning_velocity: true
@@ -63,7 +63,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 10.0
-        inflation_radius: 0.10
+        inflation_radius: 0.2
       voxel_layer:
         plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
@@ -121,8 +121,8 @@ global_costmap:
         map_subscribe_transient_local: True
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.7
+        cost_scaling_factor: 10.0
+        inflation_radius: 0.2
       always_send_full_costmap: True
 
 # The yaml_filename does not need to be specified since it going to be set by defaults in launch.

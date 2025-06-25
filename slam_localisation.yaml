@@ -1,7 +1,7 @@
 slam_toolbox:
   ros__parameters:
     mode: localization
-    map_file_name: "/home/technik12345/mapkastp0"
+    map_file_name: "/home/technik12345/mapkastp1"
     use_sim_time: false
 
     # --- TF & сканы ---
